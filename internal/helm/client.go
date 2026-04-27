@@ -25,6 +25,7 @@ import (
 	"helm.sh/helm/v3/pkg/releaseutil"
 	"helm.sh/helm/v3/pkg/repo"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/rest"
 )
 
 // HTTP client for ArtifactHub requests
@@ -126,13 +127,89 @@ func ReinitClient(kubeconfig string) error {
 
 // getActionConfig creates a new action configuration for the given namespace
 func (c *Client) getActionConfig(namespace string) (*action.Configuration, error) {
+	return c.buildActionConfig(namespace, "", nil)
+}
+
+// getActionConfigForUser creates an action configuration with K8s impersonation set.
+// Used for write operations when auth is enabled.
+func (c *Client) getActionConfigForUser(namespace, username string, groups []string) (*action.Configuration, error) {
+	return c.buildActionConfig(namespace, username, groups)
+}
+
+// buildActionConfig is the shared init path for both anonymous and
+// impersonated action configurations. When kubeconfig is empty (running
+// in-cluster) we hand Helm an in-cluster RESTClientGetter built from the
+// rest.Config the rest of Radar already uses — Helm's default
+// ConfigFlags only resolves kubeconfig and would otherwise fall through
+// to localhost:8080 inside a pod with no ~/.kube/config.
+func (c *Client) buildActionConfig(namespace, username string, groups []string) (*action.Configuration, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	actionConfig := new(action.Configuration)
 
-	// Use RESTClientGetter for kubeconfig
-	// NOTE: Use false for usePersistentConfig to avoid caching issues during context switches
+	getter, err := c.restClientGetter(namespace, username, groups)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build helm RESTClientGetter: %w", err)
+	}
+
+	if err := actionConfig.Init(getter, namespace, "secrets", log.Printf); err != nil {
+		if username != "" {
+			return nil, fmt.Errorf("failed to initialize helm action config for user %s: %w", username, err)
+		}
+		return nil, fmt.Errorf("failed to initialize helm action config: %w", err)
+	}
+
+	return actionConfig, nil
+}
+
+// restClientGetter picks the RESTClientGetter strategy for this client.
+// Caller must hold c.mu (read or write). Reads global k8s package state
+// (rest.Config, current context); pure logic lives in
+// buildRESTClientGetter so it can be tested without those globals.
+func (c *Client) restClientGetter(namespace, username string, groups []string) (genericclioptions.RESTClientGetter, error) {
+	return buildRESTClientGetter(restClientGetterParams{
+		kubeconfig:     c.kubeconfig,
+		restConfig:     k8s.GetConfig(),
+		currentContext: k8s.GetContextName(),
+		namespace:      namespace,
+		username:       username,
+		groups:         groups,
+	})
+}
+
+type restClientGetterParams struct {
+	kubeconfig     string
+	restConfig     *rest.Config
+	currentContext string
+	namespace      string
+	username       string
+	groups         []string
+}
+
+// buildRESTClientGetter is the pure logic behind Client.restClientGetter.
+// Two strategies:
+//
+//   - kubeconfig path is set: hand Helm a ConfigFlags pointing at that
+//     single file. This is the dominant OSS path (kubectl plugin /
+//     standalone binary on a laptop with ~/.kube/config).
+//   - kubeconfig path is empty: hand Helm the rest.Config Radar already
+//     resolved at boot. Fires for in-cluster deploys (Hub mode, OSS
+//     Helm-chart deploy — no ~/.kube/config in the pod) and for
+//     multi-source kubeconfig modes (--kubeconfig-dir / multi-path
+//     KUBECONFIG, where there's no single file path to hand Helm).
+func buildRESTClientGetter(p restClientGetterParams) (genericclioptions.RESTClientGetter, error) {
+	if p.kubeconfig == "" {
+		if p.restConfig != nil {
+			return newRESTConfigGetter(p.restConfig, p.namespace, p.username, p.groups), nil
+		}
+		// No kubeconfig path AND no resolved rest.Config — no point in
+		// handing Helm a getter that would fall through to localhost:8080.
+		// Surface the misconfiguration instead.
+		return nil, fmt.Errorf("helm: no kubeconfig path and no resolved rest.Config available")
+	}
+
+	// usePersistentConfig=false avoids caching issues across context switches.
 	configFlags := genericclioptions.NewConfigFlags(false)
 	// Override the default discovery cache dir ($HOME/.kube/cache) to a writable path
 	// when running on a read-only filesystem (e.g. in-cluster with readOnlyRootFilesystem).
@@ -140,61 +217,23 @@ func (c *Client) getActionConfig(namespace string) (*action.Configuration, error
 		kubeCacheDir := "/tmp/helm/kube-cache"
 		configFlags.CacheDir = &kubeCacheDir
 	}
-	if c.kubeconfig != "" {
-		configFlags.KubeConfig = &c.kubeconfig
-	}
-	if namespace != "" {
-		configFlags.Namespace = &namespace
+	configFlags.KubeConfig = &p.kubeconfig
+	if p.namespace != "" {
+		configFlags.Namespace = &p.namespace
 	}
 
-	// Use Explorer's current context (in-memory) instead of kubeconfig's current-context
-	// This ensures Helm uses the same context as the rest of Explorer after context switches
-	currentContext := k8s.GetContextName()
-	if currentContext != "" && currentContext != "in-cluster" {
-		configFlags.Context = &currentContext
+	// Use Explorer's current context (in-memory) instead of kubeconfig's
+	// current-context, so Helm tracks Explorer through context switches.
+	if p.currentContext != "" && p.currentContext != "in-cluster" {
+		configFlags.Context = &p.currentContext
 	}
 
-	if err := actionConfig.Init(configFlags, namespace, "secrets", log.Printf); err != nil {
-		return nil, fmt.Errorf("failed to initialize helm action config: %w", err)
+	if p.username != "" {
+		configFlags.Impersonate = &p.username
+		configFlags.ImpersonateGroup = &p.groups
 	}
 
-	return actionConfig, nil
-}
-
-// getActionConfigForUser creates an action configuration with K8s impersonation set.
-// Used for write operations when auth is enabled.
-func (c *Client) getActionConfigForUser(namespace, username string, groups []string) (*action.Configuration, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	actionConfig := new(action.Configuration)
-
-	configFlags := genericclioptions.NewConfigFlags(false)
-	if homeDir, err := os.UserHomeDir(); err != nil || !isDirWritable(homeDir) {
-		kubeCacheDir := "/tmp/helm/kube-cache"
-		configFlags.CacheDir = &kubeCacheDir
-	}
-	if c.kubeconfig != "" {
-		configFlags.KubeConfig = &c.kubeconfig
-	}
-	if namespace != "" {
-		configFlags.Namespace = &namespace
-	}
-
-	currentContext := k8s.GetContextName()
-	if currentContext != "" && currentContext != "in-cluster" {
-		configFlags.Context = &currentContext
-	}
-
-	// Set impersonation
-	configFlags.Impersonate = &username
-	configFlags.ImpersonateGroup = &groups
-
-	if err := actionConfig.Init(configFlags, namespace, "secrets", log.Printf); err != nil {
-		return nil, fmt.Errorf("failed to initialize helm action config for user %s: %w", username, err)
-	}
-
-	return actionConfig, nil
+	return configFlags, nil
 }
 
 // GetActionConfig returns an action configuration for the given namespace.

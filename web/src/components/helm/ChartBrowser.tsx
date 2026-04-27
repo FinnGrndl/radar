@@ -23,7 +23,13 @@ export function ChartBrowser({ onChartSelect }: ChartBrowserProps) {
   const [showVerifiedOnly, setShowVerifiedOnly] = useState(false)
   const [artifactHubSort, setArtifactHubSort] = useState<ArtifactHubSortOption>('relevance')
 
+  // Repo refresh is gated only by `requireHelmWrite` on the backend
+  // (handleUpdateRepository deliberately skips requireCloudRole — it
+  // mutates pod-local chart cache, not cluster state). So the SPA gate
+  // here must NOT include the Cloud role check, or Cloud viewers with
+  // rbac.helm=true would be blocked from a refresh the backend allows.
   const canHelmWrite = useCanHelmWrite()
+  const helmWriteReason = canHelmWrite ? '' : 'Helm write permissions required. Set rbac.helm=true in the Radar Helm chart values.'
 
   // Local repo hooks
   const { data: repositories, isLoading: reposLoading } = useHelmRepositories()
@@ -162,6 +168,7 @@ export function ChartBrowser({ onChartSelect }: ChartBrowserProps) {
                       onUpdate={() => handleUpdateRepo(repo.name)}
                       isUpdating={updateRepoMutation.isPending}
                       canUpdate={canHelmWrite}
+                      cantUpdateReason={helmWriteReason}
                     />
                   ))
                 )}
@@ -235,7 +242,7 @@ export function ChartBrowser({ onChartSelect }: ChartBrowserProps) {
             </label>
 
             {/* Refresh button */}
-            <Tooltip content={canHelmWrite ? "Update all repositories" : "Helm write permissions required (rbac.helm=true)"}>
+            <Tooltip content={canHelmWrite ? "Update all repositories" : helmWriteReason}>
               <button
                 onClick={handleUpdateAllRepos}
                 disabled={updateRepoMutation.isPending || !canHelmWrite}
@@ -356,9 +363,13 @@ interface RepoDropdownItemProps {
   onUpdate: () => void
   isUpdating: boolean
   canUpdate: boolean
+  /** Reason rendered in the disabled button's tooltip when canUpdate
+   *  is false — only the rbac.helm capability is relevant here, since
+   *  repo refresh is not Cloud-role-gated on the backend. */
+  cantUpdateReason?: string
 }
 
-function RepoDropdownItem({ repo, isSelected, onSelect, onUpdate, isUpdating, canUpdate }: RepoDropdownItemProps) {
+function RepoDropdownItem({ repo, isSelected, onSelect, onUpdate, isUpdating, canUpdate, cantUpdateReason }: RepoDropdownItemProps) {
   return (
     <div className="flex items-center justify-between px-3 py-2 hover:bg-theme-hover group">
       <button
@@ -379,7 +390,7 @@ function RepoDropdownItem({ repo, isSelected, onSelect, onUpdate, isUpdating, ca
         onClick={(e) => { e.stopPropagation(); onUpdate() }}
         disabled={isUpdating || !canUpdate}
         className="p-1 text-theme-text-tertiary hover:text-theme-text-primary opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
-        title={canUpdate ? "Update repository" : "Helm write permissions required (rbac.helm=true)"}
+        title={canUpdate ? "Update repository" : (cantUpdateReason ?? "Helm write permissions required")}
       >
         <RefreshCw className={clsx('w-3.5 h-3.5', isUpdating && 'animate-spin')} />
       </button>

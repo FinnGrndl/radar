@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient, skipToken } from '@tanstack/react-query'
 import { showApiError, showApiSuccess } from '../components/ui/Toast'
+import { useCanHelmWrite } from '../contexts/CapabilitiesContext'
 import type {
   Topology,
   ClusterInfo,
@@ -212,7 +213,13 @@ export interface DashboardHelmRelease {
 export interface DashboardHelmSummary {
   total: number
   releases: DashboardHelmRelease[]
-  restricted?: boolean // True when user lacks permissions to list Helm releases
+  restricted?: boolean // True when user lacks permissions to list Helm releases (RBAC-denied)
+  // error + errorCode populated when the Helm read failed for a non-RBAC
+  // reason (client not initialized, unconfigured, network). Surfaced
+  // via the dashboard widget so empty results aren't mistaken for
+  // "this cluster has zero releases."
+  error?: string
+  errorCode?: string
 }
 
 export interface DashboardCRDCount {
@@ -264,6 +271,7 @@ export interface DashboardResponse {
   audit: DashboardAudit | null
   nodeVersionSkew: { versions: Record<string, string[]>; minVersion: string; maxVersion: string } | null
   deferredLoading?: boolean // True while deferred informers (secrets, events, etc.) are still syncing
+  partialData?: string[] // Resource kinds still loading after first paint (slow-cluster fallback)
   accessRestricted?: boolean // True when user has no namespace access (RBAC)
 }
 
@@ -654,11 +662,16 @@ export function useNamespaceCapabilities(namespace: string | undefined, globalCa
 }
 
 // Auth
+export type CloudRole = 'owner' | 'member' | 'viewer'
+
 export interface AuthMe {
   authEnabled: boolean
   authMode?: string
   username?: string
   groups?: string[]
+  /** Pre-computed Cloud tier from `cloud:<tier>` group prefix.
+   *  Absent when not running under Cloud (OSS, OIDC, no role group). */
+  cloudRole?: CloudRole
 }
 
 export function useAuthMe() {
@@ -667,6 +680,81 @@ export function useAuthMe() {
     queryFn: () => fetchJSON('/auth/me'),
     staleTime: 300000, // 5 minutes
   })
+}
+
+// Tier ordering for Cloud-role gates. Mirrors radar OSS pkg/auth
+// CloudRole.AtLeast — the SPA must agree with the backend on what
+// "member-or-higher" means; otherwise we'd hide a button the
+// backend would happily honor (or vice versa).
+const CLOUD_ROLE_RANK: Record<string, number> = { viewer: 1, member: 2, owner: 3 }
+
+/**
+ * useCloudRole returns the caller's Cloud tier (`owner` / `member` /
+ * `viewer`) and a `canAtLeast(min)` gate. When no Cloud role is
+ * present (OSS, OIDC, no role group, OR auth/me is still loading),
+ * `canAtLeast` returns true — the gate is strictly additive for
+ * Cloud-attributed users, mirroring the backend's `requireCloudRole`
+ * semantics. Use for passive content gating (panels, sections); use
+ * `useCanHelmAct` (or similar) for *click-prone* surfaces where you
+ * need fail-closed behavior during the auth/me round-trip to prevent
+ * a viewer from clicking through during the loading window.
+ *
+ * Why optimistic during load: the gated empty state ("Your role can't
+ * view…") rendered briefly to OSS / kubectl-plugin users before
+ * auth/me resolves is a worse regression than a Cloud viewer seeing
+ * a content tab populate for a tick before being gated out. Click-
+ * prevention belongs in the action-button hook, not here.
+ */
+export function useCloudRole() {
+  const { data, isLoading } = useAuthMe()
+  const role = data?.cloudRole
+  return {
+    role,
+    isLoading,
+    isCloudUser: !!role,
+    canAtLeast: (min: CloudRole) => {
+      if (!role) return true // not Cloud-attributed (incl. still-loading) → no gate
+      return (CLOUD_ROLE_RANK[role] ?? 0) >= (CLOUD_ROLE_RANK[min] ?? 0)
+    },
+  }
+}
+
+/**
+ * useCanHelmAct combines the K8s capability gate (rbac.helm=true) and
+ * the Cloud role gate (member+) into a single answer for any Helm
+ * write or sensitive-read button. Returns { allowed, reason } so the
+ * tooltip can explain which gate failed.
+ *
+ * Cloud role check runs FIRST so the message is actionable for Cloud
+ * users — telling them "Helm write permissions required" is wrong if
+ * the chart is fine and the actual gate is their viewer role.
+ */
+export function useCanHelmAct(): { allowed: boolean; reason?: string } {
+  const helmWrite = useCanHelmWrite()
+  const { role, canAtLeast, isLoading } = useCloudRole()
+  // Fail-closed for action buttons during the auth/me round-trip:
+  // a Cloud viewer who clicks during loading would otherwise fire a
+  // real request that gets 403'd. For OSS / kubectl-plugin the
+  // round-trip is sub-ms so this is imperceptible; for Cloud it
+  // prevents the click-through window. Distinct from useCloudRole's
+  // canAtLeast (which is optimistic during loading) because passive
+  // content gates don't have a click-handler to misfire.
+  if (isLoading) {
+    return { allowed: false, reason: 'Loading permissions…' }
+  }
+  if (!canAtLeast('member')) {
+    return {
+      allowed: false,
+      reason: `Your Radar Cloud role (${role ?? 'unknown'}) cannot run Helm operations. Ask a member or owner.`,
+    }
+  }
+  if (!helmWrite) {
+    return {
+      allowed: false,
+      reason: 'Helm write permissions required. Set rbac.helm=true in the Radar Helm chart values.',
+    }
+  }
+  return { allowed: true }
 }
 
 // Namespaces
@@ -1652,8 +1740,11 @@ export function useHelmRelease(namespace: string, name: string) {
   })
 }
 
-// Get manifest for a Helm release (optionally at a specific revision)
-export function useHelmManifest(namespace: string, name: string, revision?: number) {
+// Get manifest for a Helm release (optionally at a specific revision).
+// `enabled` lets callers skip the query when the user's Cloud role
+// would 403 the read — saves a round-trip and avoids a transient
+// "error" state that the role-gated empty panel doesn't need.
+export function useHelmManifest(namespace: string, name: string, revision?: number, enabled = true) {
   const params = revision ? `?revision=${revision}` : ''
   return useQuery<string>({
     queryKey: ['helm-manifest', namespace, name, revision],
@@ -1665,34 +1756,35 @@ export function useHelmManifest(namespace: string, name: string, revision?: numb
       }
       return response.text()
     },
-    enabled: Boolean(namespace && name),
+    enabled: Boolean(namespace && name && enabled),
     staleTime: 60000, // 1 minute
   })
 }
 
-// Get values for a Helm release
-export function useHelmValues(namespace: string, name: string, allValues?: boolean) {
+// Get values for a Helm release. `enabled` see useHelmManifest.
+export function useHelmValues(namespace: string, name: string, allValues?: boolean, enabled = true) {
   const params = allValues ? '?all=true' : ''
   return useQuery<HelmValues>({
     queryKey: ['helm-values', namespace, name, allValues],
     queryFn: () => fetchJSON(`/helm/releases/${namespace}/${name}/values${params}`),
-    enabled: Boolean(namespace && name),
+    enabled: Boolean(namespace && name && enabled),
     staleTime: 60000,
   })
 }
 
-// Get diff between two revisions
+// Get diff between two revisions. `enabled` see useHelmManifest.
 export function useHelmManifestDiff(
   namespace: string,
   name: string,
   revision1: number,
-  revision2: number
+  revision2: number,
+  enabled = true,
 ) {
   return useQuery<ManifestDiff>({
     queryKey: ['helm-diff', namespace, name, revision1, revision2],
     queryFn: () =>
       fetchJSON(`/helm/releases/${namespace}/${name}/diff?revision1=${revision1}&revision2=${revision2}`),
-    enabled: Boolean(namespace && name && revision1 > 0 && revision2 > 0 && revision1 !== revision2),
+    enabled: Boolean(namespace && name && revision1 > 0 && revision2 > 0 && revision1 !== revision2 && enabled),
     staleTime: 60000,
   })
 }
