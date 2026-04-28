@@ -17,6 +17,7 @@ import {
   useArgoSync, useArgoRefresh, useArgoSuspend, useArgoResume,
   useCordonNode, useUncordonNode, useDrainNode,
   useCascadeDeletePreview,
+  useResourceEvents,
   fetchJSON,
 } from '../../api/client'
 import { PrometheusCharts, isPrometheusSupported } from '../resource/PrometheusCharts'
@@ -290,6 +291,16 @@ export function WorkloadView({
   // Fetch topology for hierarchy building (only when expanded)
   const { data: topology } = useTopology([namespace], 'resources', { enabled: expanded })
 
+  // Always fetched so Recent Events populates on drawer open; allEvents below is
+  // gated on expanded because it's namespace-wide and expensive.
+  const {
+    k8sEvents: resourceFocusedK8sEvents,
+    updates: resourceFocusedUpdates,
+    isLoading: resourceFocusedEventsLoading,
+    k8sError: resourceFocusedK8sError,
+    updatesError: resourceFocusedUpdatesError,
+  } = useResourceEvents(kindProp, namespace, name)
+
   // Fetch all events for this resource's namespace (only when expanded)
   const { data: allEvents, isLoading: eventsLoading } = useChanges({
     namespaces: [namespace],
@@ -336,6 +347,11 @@ export function WorkloadView({
       allEvents={allEvents}
       eventsLoading={eventsLoading}
       topology={topology}
+      resourceFocusedK8sEvents={resourceFocusedK8sEvents}
+      resourceFocusedUpdates={resourceFocusedUpdates}
+      resourceFocusedEventsLoading={resourceFocusedEventsLoading}
+      resourceFocusedK8sError={resourceFocusedK8sError}
+      resourceFocusedUpdatesError={resourceFocusedUpdatesError}
       // Capabilities
       canUpdateSecrets={canUpdateSecrets}
       // Mutations

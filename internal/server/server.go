@@ -1661,6 +1661,7 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 	filterPreset := r.URL.Query().Get("filter")
 	includeK8sEvents := r.URL.Query().Get("include_k8s_events") != "false" // default true
 	includeManaged := r.URL.Query().Get("include_managed") == "true"       // default false
+	sourcesParam := r.URL.Query().Get("sources")                           // comma-separated, e.g. "k8s_event"
 
 	// Parse since timestamp
 	var since time.Time
@@ -1700,6 +1701,24 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 	}
 	if kind != "" {
 		opts.Kinds = []string{kind}
+	}
+	if sourcesParam != "" {
+		validSources := map[timeline.EventSource]bool{
+			timeline.SourceInformer:   true,
+			timeline.SourceK8sEvent:   true,
+			timeline.SourceHistorical: true,
+		}
+		for raw := range strings.SplitSeq(sourcesParam, ",") {
+			src := timeline.EventSource(strings.TrimSpace(raw))
+			if src == "" {
+				continue
+			}
+			if !validSources[src] {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid source %q (valid: informer, k8s_event, historical)", src))
+				return
+			}
+			opts.Sources = append(opts.Sources, src)
+		}
 	}
 
 	events, err := store.Query(r.Context(), opts)
