@@ -217,12 +217,22 @@ function AppInner() {
   // Get mainView from URL path
   const mainView = getViewFromPath(location.pathname)
 
-  // `/resources` vs `/resources/pods` — both mean Pods; `/resources/deployments` etc. switches workload kind.
+  // Workload slug after `/resources/` (defaults to `pods`). Bare `/resources` redirects to `/resources/pods`.
   const normalizedResourcesKindSlug = useMemo(() => {
     const m = location.pathname.match(/^\/resources(?:\/([^/]+))?/)
     const slug = m?.[1] ?? ''
     return slug || 'pods'
   }, [location.pathname])
+
+  // Canonical URL — `/resources` is not stable for bookmarks/sharing; normalize to `/resources/pods`.
+  useEffect(() => {
+    const path = location.pathname.replace(/\/+$/, '') || '/'
+    if (path !== '/resources') return
+    navigate(
+      { pathname: '/resources/pods', search: location.search, hash: location.hash },
+      { replace: true },
+    )
+  }, [location.pathname, location.search, location.hash, navigate])
 
   // Set mainView by navigating to the path
   const setMainView = useCallback((view: ExtendedMainView, params?: Record<string, string>) => {
