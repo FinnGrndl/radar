@@ -26,25 +26,26 @@ import (
 
 // AppConfig holds all parsed configuration for the Radar application.
 type AppConfig struct {
-	Kubeconfig       string
-	KubeconfigDirs   []string
-	Namespace        string
-	Port             int
-	NoBrowser        bool
-	DevMode          bool
-	HistoryLimit     int
-	DebugEvents      bool
-	FakeInCluster    bool
-	DisableHelmWrite bool
+	Kubeconfig           string
+	KubeconfigDirs       []string
+	Namespace            string
+	Port                 int
+	NoBrowser            bool
+	DevMode              bool
+	HistoryLimit         int
+	DebugEvents          bool
+	FakeInCluster        bool
+	DisableHelmWrite     bool
 	DisableExec          bool
 	DisableLocalTerminal bool
 	PodShellDefault      string
 	TimelineStorage      string
-	TimelineDBPath   string
-	PrometheusURL    string
-	Version          string
-	MCPEnabled       bool
-	AuthConfig       auth.Config
+	TimelineDBPath       string
+	TimelineRetention    time.Duration
+	PrometheusURL        string
+	Version              string
+	MCPEnabled           bool
+	AuthConfig           auth.Config
 }
 
 // SetGlobals applies debug/test flags to global state.
@@ -104,6 +105,7 @@ func BuildTimelineStoreConfig(cfg AppConfig) timeline.StoreConfig {
 			dbPath = filepath.Join(homeDir, ".radar", "timeline.db")
 		}
 		storeCfg.Path = dbPath
+		storeCfg.RetentionAge = cfg.TimelineRetention
 	}
 	return storeCfg
 }

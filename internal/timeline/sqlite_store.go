@@ -26,6 +26,9 @@ type SQLiteStore struct {
 	filterCache   map[string]*CompiledFilter
 	cacheMu       sync.RWMutex
 	path          string
+	quit          chan struct{}
+	wg            sync.WaitGroup
+	closeOnce     sync.Once
 }
 
 // NewSQLiteStore creates a new SQLite-backed event store.
@@ -66,6 +69,7 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		seenResources: make(map[string]bool),
 		filterCache:   make(map[string]*CompiledFilter),
 		path:          dbPath,
+		quit:          make(chan struct{}),
 	}
 
 	if err := store.initSchema(); err != nil {
@@ -494,8 +498,12 @@ func (s *SQLiteStore) Stats() StoreStats {
 	return stats
 }
 
-// Close releases any resources held by the store
+// Close releases any resources held by the store. Safe to call multiple times.
 func (s *SQLiteStore) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.quit)
+		s.wg.Wait()
+	})
 	return s.db.Close()
 }
 
@@ -507,6 +515,34 @@ func (s *SQLiteStore) Cleanup(ctx context.Context, maxAge time.Duration) (int64,
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// StartCleanupLoop spawns a goroutine that periodically deletes events older
+// than retention. Without this, the events table grows unbounded. The loop
+// exits when Close is called. retention <= 0 disables cleanup entirely.
+func (s *SQLiteStore) StartCleanupLoop(retention, interval time.Duration) {
+	if retention <= 0 || interval <= 0 {
+		return
+	}
+	s.wg.Go(func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.quit:
+				return
+			case <-ticker.C:
+				n, err := s.Cleanup(context.Background(), retention)
+				if err != nil {
+					log.Printf("[timeline] cleanup failed for %s: %v", s.path, err)
+					continue
+				}
+				if n > 0 {
+					log.Printf("[timeline] cleanup: deleted %d events older than %s from %s", n, retention, s.path)
+				}
+			}
+		}
+	})
 }
 
 // scanEvent scans a row into a TimelineEvent
