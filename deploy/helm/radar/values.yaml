@@ -123,6 +123,7 @@ rbac:
     traefik: true           # traefik.io, traefik.containo.us
     trivy: true             # aquasecurity.github.io
     velero: true            # velero.io
+    verticalPodAutoscaler: true  # autoscaling.k8s.io (VPA — granted by default; no-op on clusters where VPA isn't installed)
 
   # Additional CRD API groups for custom/unlisted CRDs
   # Example: ["mycompany.io", "custom.example.com"]

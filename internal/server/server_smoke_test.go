@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -932,6 +933,48 @@ func TestSmokePutConfigInvalidBody(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid body, got %d", resp.StatusCode)
+	}
+}
+
+// TestSmokeCapabilitiesShape locks down the JSON contract for
+// /api/capabilities. The reflection-based alignment test in internal/k8s
+// asserts the probe writes every field — this test asserts the HTTP layer
+// surfaces every field as a JSON key. A regression that reverts to a
+// hand-mapped block, adds an `omitempty` that hides false values, or
+// changes the field-marshaling path would be caught here.
+func TestSmokeCapabilitiesShape(t *testing.T) {
+	resp := get(t, "/api/capabilities")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Resources map[string]bool `json:"resources"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Resources == nil {
+		t.Fatal("capabilities response missing 'resources' field — handler probably dropped it on the floor")
+	}
+
+	// Enumerate every JSON tag on ResourcePermissions and assert it shows
+	// up in the response. Adding a new struct field without wiring the
+	// handler will fail here.
+	permsType := reflect.TypeOf(k8s.ResourcePermissions{})
+	for i := 0; i < permsType.NumField(); i++ {
+		field := permsType.Field(i)
+		tag := field.Tag.Get("json")
+		if tag == "" {
+			t.Errorf("ResourcePermissions.%s has no json tag", field.Name)
+			continue
+		}
+		if _, ok := body.Resources[tag]; !ok {
+			t.Errorf("capabilities.resources missing key %q for ResourcePermissions.%s — "+
+				"the handler isn't copying this field to the JSON response.",
+				tag, field.Name)
+		}
 	}
 }
 

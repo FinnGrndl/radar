@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -387,6 +388,124 @@ func FetchResourceList(cache *ResourceCache, kind string, namespaces []string) (
 				return ToRuntimeObjects(items), nil
 			},
 		)
+	case "networkpolicies", "networkpolicy", "netpols", "netpol":
+		if cache.NetworkPolicies() == nil {
+			return nil, fmt.Errorf("forbidden: networkpolicies")
+		}
+		return listPerNs(
+			func() ([]runtime.Object, error) {
+				items, err := cache.NetworkPolicies().List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+			func(ns string) ([]runtime.Object, error) {
+				items, err := cache.NetworkPolicies().NetworkPolicies(ns).List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+		)
+	case "serviceaccounts", "serviceaccount", "sa":
+		if cache.ServiceAccounts() == nil {
+			return nil, fmt.Errorf("forbidden: serviceaccounts")
+		}
+		return listPerNs(
+			func() ([]runtime.Object, error) {
+				items, err := cache.ServiceAccounts().List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+			func(ns string) ([]runtime.Object, error) {
+				items, err := cache.ServiceAccounts().ServiceAccounts(ns).List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+		)
+	case "limitranges", "limitrange":
+		if cache.LimitRanges() == nil {
+			return nil, fmt.Errorf("forbidden: limitranges")
+		}
+		return listPerNs(
+			func() ([]runtime.Object, error) {
+				items, err := cache.LimitRanges().List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+			func(ns string) ([]runtime.Object, error) {
+				items, err := cache.LimitRanges().LimitRanges(ns).List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+		)
+	case "roles", "role":
+		if cache.Roles() == nil {
+			return nil, fmt.Errorf("forbidden: roles")
+		}
+		return listPerNs(
+			func() ([]runtime.Object, error) {
+				items, err := cache.Roles().List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+			func(ns string) ([]runtime.Object, error) {
+				items, err := cache.Roles().Roles(ns).List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+		)
+	case "clusterroles", "clusterrole":
+		if cache.ClusterRoles() == nil {
+			return nil, fmt.Errorf("forbidden: clusterroles")
+		}
+		items, err := cache.ClusterRoles().List(labels.Everything())
+		if err != nil {
+			return nil, err
+		}
+		return ToRuntimeObjects(items), nil
+	case "rolebindings", "rolebinding":
+		if cache.RoleBindings() == nil {
+			return nil, fmt.Errorf("forbidden: rolebindings")
+		}
+		return listPerNs(
+			func() ([]runtime.Object, error) {
+				items, err := cache.RoleBindings().List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+			func(ns string) ([]runtime.Object, error) {
+				items, err := cache.RoleBindings().RoleBindings(ns).List(labels.Everything())
+				if err != nil {
+					return nil, err
+				}
+				return ToRuntimeObjects(items), nil
+			},
+		)
+	case "clusterrolebindings", "clusterrolebinding":
+		if cache.ClusterRoleBindings() == nil {
+			return nil, fmt.Errorf("forbidden: clusterrolebindings")
+		}
+		items, err := cache.ClusterRoleBindings().List(labels.Everything())
+		if err != nil {
+			return nil, err
+		}
+		return ToRuntimeObjects(items), nil
 	default:
 		return nil, ErrUnknownKind
 	}
@@ -491,6 +610,41 @@ func FetchResource(cache *ResourceCache, kind, namespace, name string) (runtime.
 			return nil, fmt.Errorf("forbidden: poddisruptionbudgets")
 		}
 		return cache.PodDisruptionBudgets().PodDisruptionBudgets(namespace).Get(name)
+	case "networkpolicies", "networkpolicy", "netpols", "netpol":
+		if cache.NetworkPolicies() == nil {
+			return nil, fmt.Errorf("forbidden: networkpolicies")
+		}
+		return cache.NetworkPolicies().NetworkPolicies(namespace).Get(name)
+	case "serviceaccounts", "serviceaccount", "sa":
+		if cache.ServiceAccounts() == nil {
+			return nil, fmt.Errorf("forbidden: serviceaccounts")
+		}
+		return cache.ServiceAccounts().ServiceAccounts(namespace).Get(name)
+	case "limitranges", "limitrange":
+		if cache.LimitRanges() == nil {
+			return nil, fmt.Errorf("forbidden: limitranges")
+		}
+		return cache.LimitRanges().LimitRanges(namespace).Get(name)
+	case "roles", "role":
+		if cache.Roles() == nil {
+			return nil, fmt.Errorf("forbidden: roles")
+		}
+		return cache.Roles().Roles(namespace).Get(name)
+	case "clusterroles", "clusterrole":
+		if cache.ClusterRoles() == nil {
+			return nil, fmt.Errorf("forbidden: clusterroles")
+		}
+		return cache.ClusterRoles().Get(name)
+	case "rolebindings", "rolebinding":
+		if cache.RoleBindings() == nil {
+			return nil, fmt.Errorf("forbidden: rolebindings")
+		}
+		return cache.RoleBindings().RoleBindings(namespace).Get(name)
+	case "clusterrolebindings", "clusterrolebinding":
+		if cache.ClusterRoleBindings() == nil {
+			return nil, fmt.Errorf("forbidden: clusterrolebindings")
+		}
+		return cache.ClusterRoleBindings().Get(name)
 	default:
 		return nil, ErrUnknownKind
 	}
@@ -557,5 +711,26 @@ func SetTypeMeta(resource any) {
 	case *policyv1.PodDisruptionBudget:
 		r.APIVersion = "policy/v1"
 		r.Kind = "PodDisruptionBudget"
+	case *networkingv1.NetworkPolicy:
+		r.APIVersion = "networking.k8s.io/v1"
+		r.Kind = "NetworkPolicy"
+	case *corev1.ServiceAccount:
+		r.APIVersion = "v1"
+		r.Kind = "ServiceAccount"
+	case *corev1.LimitRange:
+		r.APIVersion = "v1"
+		r.Kind = "LimitRange"
+	case *rbacv1.Role:
+		r.APIVersion = "rbac.authorization.k8s.io/v1"
+		r.Kind = "Role"
+	case *rbacv1.ClusterRole:
+		r.APIVersion = "rbac.authorization.k8s.io/v1"
+		r.Kind = "ClusterRole"
+	case *rbacv1.RoleBinding:
+		r.APIVersion = "rbac.authorization.k8s.io/v1"
+		r.Kind = "RoleBinding"
+	case *rbacv1.ClusterRoleBinding:
+		r.APIVersion = "rbac.authorization.k8s.io/v1"
+		r.Kind = "ClusterRoleBinding"
 	}
 }

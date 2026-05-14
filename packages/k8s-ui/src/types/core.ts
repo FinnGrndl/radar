@@ -1,6 +1,8 @@
 // Topology types matching the Go backend
 
-// Per-resource-type RBAC permissions (matches backend k8s.ResourcePermissions)
+// Per-resource-type RBAC permissions. Field names must match the JSON keys
+// produced by ResourcePermissions in internal/k8s/capabilities.go — there
+// is no automated check across the Go/TS boundary.
 export interface ResourcePermissions {
   pods: boolean
   services: boolean
@@ -12,19 +14,38 @@ export interface ResourcePermissions {
   configMaps: boolean
   secrets: boolean
   events: boolean
-  pvcs: boolean
+  persistentVolumeClaims: boolean
   nodes: boolean
   namespaces: boolean
   jobs: boolean
   cronJobs: boolean
-  hpas: boolean
-  gateways: boolean
-  httpRoutes: boolean
+  horizontalPodAutoscalers: boolean
+  persistentVolumes: boolean
+  storageClasses: boolean
+  podDisruptionBudgets: boolean
+  networkPolicies: boolean
+  serviceAccounts: boolean
   roles: boolean
   clusterRoles: boolean
   roleBindings: boolean
   clusterRoleBindings: boolean
+  limitRanges: boolean
+  gateways: boolean
+  httpRoutes: boolean
+  verticalPodAutoscalers: boolean
 }
+
+// Keys in ResourcePermissions that represent optional CRDs Radar can monitor
+// when they're installed in the cluster. A `false` here means "CRD not
+// installed (or RBAC denied)" — NOT "Radar is missing data the user expects",
+// so banners about RBAC restrictions should ignore these keys.
+//
+// Keep in sync with dynamicCapabilityKinds in internal/k8s/capabilities_alignment_test.go.
+export const OPTIONAL_RESOURCE_KINDS: ReadonlyArray<keyof ResourcePermissions> = [
+  'gateways',
+  'httpRoutes',
+  'verticalPodAutoscalers',
+]
 
 // Feature capabilities based on RBAC permissions
 export interface Capabilities {

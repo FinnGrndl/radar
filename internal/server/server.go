@@ -657,30 +657,24 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Include resource permissions if cache is available
-	if cache := k8s.GetResourceCache(); cache != nil {
-		enabled := cache.GetEnabledResources()
-		caps.Resources = &k8s.ResourcePermissions{
-			Pods:                     enabled["pods"],
-			Services:                 enabled["services"],
-			Deployments:              enabled["deployments"],
-			DaemonSets:               enabled["daemonsets"],
-			StatefulSets:             enabled["statefulsets"],
-			ReplicaSets:              enabled["replicasets"],
-			Ingresses:                enabled["ingresses"],
-			ConfigMaps:               enabled["configmaps"],
-			Secrets:                  enabled["secrets"],
-			Events:                   enabled["events"],
-			PersistentVolumeClaims:   enabled["persistentvolumeclaims"],
-			Nodes:                    enabled["nodes"],
-			Namespaces:               enabled["namespaces"],
-			Jobs:                     enabled["jobs"],
-			CronJobs:                 enabled["cronjobs"],
-			HorizontalPodAutoscalers: enabled["horizontalpodautoscalers"],
-			Roles:                    enabled["roles"],
-			ClusterRoles:             enabled["clusterroles"],
-			RoleBindings:             enabled["rolebindings"],
-			ClusterRoleBindings:      enabled["clusterrolebindings"],
+	// Resource permissions come straight from the cached probe result, which
+	// populates every field of ResourcePermissions via field pointers in
+	// resourceProbeTargets(). Using GetEnabledResources() instead would
+	// silently drop fields that have no typed informer (the dynamic-cache
+	// CRDs surface via probe-result only). The probe-not-yet-run fallback
+	// kicks off a probe so the response isn't blank on startup.
+	//
+	// Intentionally NOT guarded by s.requireConnected — the frontend polls
+	// /api/capabilities to detect disconnect/loading state, so the endpoint
+	// must still respond when the cluster isn't connected. A nil
+	// caps.Resources (resources field omitted from JSON) is the documented
+	// "no probe data yet" signal; the frontend has separate connection
+	// state to distinguish loading from RBAC restrictions.
+	if result := k8s.GetCachedPermissionResult(); result != nil {
+		caps.Resources = result.Perms
+	} else if k8s.GetResourceCache() != nil {
+		if result := k8s.CheckResourcePermissions(r.Context()); result != nil {
+			caps.Resources = result.Perms
 		}
 	}
 

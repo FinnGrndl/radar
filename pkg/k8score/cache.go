@@ -754,6 +754,20 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 	return rc, nil
 }
 
+// InformerResourceKeys returns the resource-type keys that have a typed
+// informer setup in this package. Read-only introspection for cross-package
+// alignment tests (e.g. internal/k8s asserting that every capability field
+// has either a typed informer here or a documented dynamic-cache exception).
+// Not intended as a stable API for application use.
+func InformerResourceKeys() []string {
+	setups := buildInformerSetups()
+	keys := make([]string, 0, len(setups))
+	for _, s := range setups {
+		keys = append(keys, s.key)
+	}
+	return keys
+}
+
 // buildInformerSetups returns the table-driven informer setup list. Each
 // entry's setup func takes the factory it should be created from — caller
 // picks the cluster-wide or a namespace-scoped factory based on the kind's
