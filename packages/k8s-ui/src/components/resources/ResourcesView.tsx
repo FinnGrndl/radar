@@ -157,7 +157,7 @@ const WORKLOAD_PROBLEMS = ['Unavailable', 'Rollout Stuck', 'Rollout In Progress'
 const WORKLOAD_KINDS = new Set(['deployments', 'statefulsets', 'daemonsets'])
 
 // Columns to skip for auto-detected filters (high cardinality, text-like, or non-filterable)
-const SKIP_FILTER_COLUMNS = new Set([
+export const SKIP_FILTER_COLUMNS = new Set([
   'name', 'age', 'keys', 'size', 'images', 'domains', 'hosts', 'rules',
   'ports', 'message', 'url', 'ref', 'revision', 'path', 'selector', 'ready', 'restarts',
   'completions', 'duration', 'schedule', 'lastRun', 'target', 'replicas', 'metrics',
@@ -165,11 +165,21 @@ const SKIP_FILTER_COLUMNS = new Set([
   'issuer', 'domain', 'presented', 'listeners', 'routes', 'addresses', 'hostnames',
   'parents', 'backends', 'controller', 'description', 'externalIP', 'address',
   'conditions', 'taints', 'desired', 'upToDate', 'available', 'owner',
-  'tls', 'endpoints', 'object', 'count', 'lastSeen', 'reason', 'source', 'inventory',
+  'tls', 'endpoints', 'object', 'count', 'lastSeen', 'source', 'inventory',
   'lastUpdated', 'chart', 'events', 'repo',
   'generators', 'applications', 'destinations', 'sources', 'budget', 'healthy', 'allowed',
   'secrets', 'subjects', 'role', 'entrypoint', 'templates',
 ])
+
+// Namespace/node cardinality scales with cluster size, not kind enum size;
+// node keeps a generous cap as a sanity bound, namespace is uncapped.
+export function isColumnFilterableByDistinctCount(colKey: string, distinctCount: number): boolean {
+  if (SKIP_FILTER_COLUMNS.has(colKey)) return false
+  const maxDistinct = colKey === 'namespace'
+    ? Number.POSITIVE_INFINITY
+    : colKey === 'node' ? 200 : 30
+  return distinctCount >= 2 && distinctCount <= maxDistinct
+}
 
 // Column definitions per resource kind
 interface Column {
@@ -235,11 +245,11 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
   pods: [
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
-    { key: 'containers', label: 'Containers', width: 'w-28' },
+    { key: 'containers', label: 'Containers', width: 'w-32' },
     { key: 'status', label: 'Status', width: 'w-40' },
     { key: 'cpu', label: 'CPU', width: 'w-40', tooltip: 'CPU usage / limit (marker = request)' },
     { key: 'memory', label: 'Memory', width: 'w-40', tooltip: 'Memory usage / limit (marker = request)' },
-    { key: 'restarts', label: 'Restarts', width: 'w-24' },
+    { key: 'restarts', label: 'Restarts', width: 'w-28' },
     { key: 'podIP', label: 'Pod IP', width: 'w-32', defaultVisible: false },
     { key: 'node', label: 'Node', width: 'w-44', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
@@ -248,8 +258,8 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
     { key: 'ready', label: 'Ready', width: 'w-24', tooltip: 'Ready pods / Desired replicas' },
-    { key: 'upToDate', label: 'Up-to-date', width: 'w-24', hideOnMobile: true, tooltip: 'Number of pods running the current pod template' },
-    { key: 'available', label: 'Available', width: 'w-24', hideOnMobile: true, tooltip: 'Number of pods available (ready for minReadySeconds)' },
+    { key: 'upToDate', label: 'Up-to-date', width: 'w-32', hideOnMobile: true, tooltip: 'Number of pods running the current pod template' },
+    { key: 'available', label: 'Available', width: 'w-28', hideOnMobile: true, tooltip: 'Number of pods available (ready for minReadySeconds)' },
     { key: 'images', label: 'Images', width: 'w-48', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
@@ -258,8 +268,8 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
     { key: 'desired', label: 'Desired', width: 'w-20', tooltip: 'Number of nodes that should run the daemon pod (based on node selector)' },
     { key: 'ready', label: 'Ready', width: 'w-20', tooltip: 'Number of pods that are ready (passing readiness probes)' },
-    { key: 'upToDate', label: 'Up-to-date', width: 'w-24', hideOnMobile: true, tooltip: 'Number of pods running the current pod template spec' },
-    { key: 'available', label: 'Available', width: 'w-24', hideOnMobile: true, tooltip: 'Number of pods available (ready for minReadySeconds duration)' },
+    { key: 'upToDate', label: 'Up-to-date', width: 'w-32', hideOnMobile: true, tooltip: 'Number of pods running the current pod template spec' },
+    { key: 'available', label: 'Available', width: 'w-28', hideOnMobile: true, tooltip: 'Number of pods available (ready for minReadySeconds duration)' },
     { key: 'images', label: 'Images', width: 'w-48', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
@@ -267,7 +277,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
     { key: 'ready', label: 'Ready', width: 'w-24', tooltip: 'Ready pods / Desired replicas' },
-    { key: 'upToDate', label: 'Up-to-date', width: 'w-24', hideOnMobile: true, tooltip: 'Number of pods running the current pod template' },
+    { key: 'upToDate', label: 'Up-to-date', width: 'w-32', hideOnMobile: true, tooltip: 'Number of pods running the current pod template' },
     { key: 'images', label: 'Images', width: 'w-48', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
@@ -330,7 +340,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
     { key: 'status', label: 'Status', width: 'w-28' },
-    { key: 'completions', label: 'Completions', width: 'w-28' },
+    { key: 'completions', label: 'Completions', width: 'w-32' },
     { key: 'duration', label: 'Duration', width: 'w-24', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
@@ -365,7 +375,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
     { key: 'status', label: 'Status', width: 'w-24' },
     { key: 'capacity', label: 'Capacity', width: 'w-24' },
-    { key: 'storageClass', label: 'Storage Class', width: 'w-36', hideOnMobile: true },
+    { key: 'storageClass', label: 'Storage Class', width: 'w-40', hideOnMobile: true },
     { key: 'accessModes', label: 'Access', width: 'w-20', tooltip: 'Access modes: RWO=ReadWriteOnce, RWX=ReadWriteMany, ROX=ReadOnlyMany' },
     { key: 'volume', label: 'Volume', width: 'w-48', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
@@ -404,7 +414,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'capacity', label: 'Capacity', width: 'w-24' },
     { key: 'accessModes', label: 'Access', width: 'w-20', tooltip: 'RWO=ReadWriteOnce, ROX=ReadOnlyMany, RWX=ReadWriteMany' },
     { key: 'reclaimPolicy', label: 'Reclaim', width: 'w-20' },
-    { key: 'storageClass', label: 'Storage Class', width: 'w-36', hideOnMobile: true },
+    { key: 'storageClass', label: 'Storage Class', width: 'w-40', hideOnMobile: true },
     { key: 'claim', label: 'Claim', width: 'w-48', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
@@ -669,8 +679,8 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
   serviceaccounts: [
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
-    { key: 'automount', label: 'Automount', width: 'w-24', tooltip: 'Whether token is automatically mounted in pods' },
-    { key: 'secrets', label: 'Secrets', width: 'w-20' },
+    { key: 'automount', label: 'Automount', width: 'w-32', tooltip: 'Whether token is automatically mounted in pods' },
+    { key: 'secrets', label: 'Secrets', width: 'w-24' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   roles: [
@@ -707,13 +717,13 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-48' },
     { key: 'holder', label: 'Holder', width: 'w-48' },
-    { key: 'renewTime', label: 'Last Renewed', width: 'w-28' },
+    { key: 'renewTime', label: 'Last Renewed', width: 'w-32' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   priorityclasses: [
     { key: 'name', label: 'Name' },
     { key: 'value', label: 'Value', width: 'w-24' },
-    { key: 'globalDefault', label: 'Global Default', width: 'w-28' },
+    { key: 'globalDefault', label: 'Global Default', width: 'w-36' },
     { key: 'preemptionPolicy', label: 'Preemption', width: 'w-32' },
     { key: 'description', label: 'Description', width: 'w-64', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
@@ -725,27 +735,27 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
   ],
   mutatingwebhookconfigurations: [
     { key: 'name', label: 'Name' },
-    { key: 'webhooks', label: 'Webhooks', width: 'w-20' },
-    { key: 'failurePolicy', label: 'Failure Policy', width: 'w-28' },
+    { key: 'webhooks', label: 'Webhooks', width: 'w-28' },
+    { key: 'failurePolicy', label: 'Failure Policy', width: 'w-36' },
     { key: 'target', label: 'Target', width: 'w-48', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   validatingwebhookconfigurations: [
     { key: 'name', label: 'Name' },
-    { key: 'webhooks', label: 'Webhooks', width: 'w-20' },
-    { key: 'failurePolicy', label: 'Failure Policy', width: 'w-28' },
+    { key: 'webhooks', label: 'Webhooks', width: 'w-28' },
+    { key: 'failurePolicy', label: 'Failure Policy', width: 'w-36' },
     { key: 'target', label: 'Target', width: 'w-48', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   events: [
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-36' },
-    { key: 'type', label: 'Type', width: 'w-20' },
-    { key: 'reason', label: 'Reason', width: 'w-28' },
+    { key: 'type', label: 'Type', width: 'w-24' },
+    { key: 'reason', label: 'Reason', width: 'w-32' },
     { key: 'message', label: 'Message', width: 'w-64' },
     { key: 'object', label: 'Object', width: 'w-48', hideOnMobile: true },
-    { key: 'count', label: 'Count', width: 'w-16' },
-    { key: 'lastSeen', label: 'Last Seen', width: 'w-24' },
+    { key: 'count', label: 'Count', width: 'w-20' },
+    { key: 'lastSeen', label: 'Last Seen', width: 'w-28' },
   ],
   // ============================================================================
   // FLUXCD GITOPS RESOURCES
@@ -935,7 +945,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'store', label: 'Store', width: 'w-36' },
     { key: 'provider', label: 'Provider', width: 'w-28' },
     { key: 'refreshInterval', label: 'Refresh', width: 'w-24' },
-    { key: 'lastSync', label: 'Last Sync', width: 'w-24' },
+    { key: 'lastSync', label: 'Last Sync', width: 'w-28' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   clusterexternalsecrets: [
@@ -969,7 +979,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'namespaces', label: 'Scope', width: 'w-24', tooltip: 'Included namespaces (* = all)' },
     { key: 'duration', label: 'Duration', width: 'w-24' },
     { key: 'expiry', label: 'Expires', width: 'w-24' },
-    { key: 'errors', label: 'Errors', width: 'w-16' },
+    { key: 'errors', label: 'Errors', width: 'w-20' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   restores: [
@@ -978,7 +988,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'status', label: 'Status', width: 'w-28' },
     { key: 'backupName', label: 'Backup', width: 'w-40' },
     { key: 'duration', label: 'Duration', width: 'w-24' },
-    { key: 'errors', label: 'Errors', width: 'w-16' },
+    { key: 'errors', label: 'Errors', width: 'w-20' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   schedules: [
@@ -1007,10 +1017,10 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-36' },
     { key: 'status', label: 'Status', width: 'w-28' },
-    { key: 'instances', label: 'Instances', width: 'w-24', tooltip: 'Ready/Total' },
+    { key: 'instances', label: 'Instances', width: 'w-28', tooltip: 'Ready/Total' },
     { key: 'primary', label: 'Primary', width: 'w-36' },
     { key: 'image', label: 'Image', width: 'w-28' },
-    { key: 'storage', label: 'Storage', width: 'w-20' },
+    { key: 'storage', label: 'Storage', width: 'w-28' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   scheduledbackups: [
@@ -1019,8 +1029,8 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'status', label: 'Status', width: 'w-24' },
     { key: 'cluster', label: 'Cluster', width: 'w-36' },
     { key: 'schedule', label: 'Schedule', width: 'w-36' },
-    { key: 'lastSchedule', label: 'Last Run', width: 'w-24' },
-    { key: 'suspended', label: 'Suspended', width: 'w-20' },
+    { key: 'lastSchedule', label: 'Last Run', width: 'w-28' },
+    { key: 'suspended', label: 'Suspended', width: 'w-28' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   poolers: [
@@ -1029,8 +1039,8 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'status', label: 'Status', width: 'w-24' },
     { key: 'cluster', label: 'Cluster', width: 'w-36' },
     { key: 'type', label: 'Type', width: 'w-16' },
-    { key: 'poolMode', label: 'Pool Mode', width: 'w-28' },
-    { key: 'instances', label: 'Instances', width: 'w-24', tooltip: 'Ready/Total' },
+    { key: 'poolMode', label: 'Pool Mode', width: 'w-32' },
+    { key: 'instances', label: 'Instances', width: 'w-28', tooltip: 'Ready/Total' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   // ============================================================================
@@ -1104,7 +1114,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'status', label: 'Status', width: 'w-28' },
     { key: 'routing', label: 'Traffic', width: 'w-20', tooltip: 'Whether this revision is receiving traffic' },
     { key: 'image', label: 'Image', width: 'w-48' },
-    { key: 'concurrency', label: 'Concurrency', width: 'w-24' },
+    { key: 'concurrency', label: 'Concurrency', width: 'w-32' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   knativeroutes: [
@@ -1366,7 +1376,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'namespace', label: 'Namespace', width: 'w-36 shrink-0' },
     { key: 'cluster', label: 'Cluster', width: 'w-32 shrink-0' },
     { key: 'ready', label: 'Ready', width: 'w-20 shrink-0' },
-    { key: 'initialized', label: 'Initialized', width: 'w-24 shrink-0' },
+    { key: 'initialized', label: 'Initialized', width: 'w-28 shrink-0' },
     { key: 'version', label: 'Version', width: 'w-24 shrink-0' },
     { key: 'age', label: 'Age', width: 'w-24 shrink-0' },
   ],
@@ -1523,7 +1533,7 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'namespace', label: 'Namespace', width: 'w-32 shrink-0' },
     { key: 'kind', label: 'Kind', width: 'w-32 shrink-0' },
     { key: 'external', label: 'External Name', width: 'min-w-48', hideOnMobile: true },
-    { key: 'provider', label: 'Provider Config', width: 'w-36 shrink-0', hideOnMobile: true },
+    { key: 'provider', label: 'Provider Config', width: 'w-40 shrink-0', hideOnMobile: true },
     { key: 'status', label: 'Status', width: 'w-32 shrink-0' },
     { key: 'age', label: 'Age', width: 'w-24 shrink-0' },
   ],
@@ -1542,9 +1552,9 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
   ],
   compositions: [
     { key: 'name', label: 'Name', width: 'min-w-40' },
-    { key: 'composite', label: 'Composite Kind', width: 'w-40 shrink-0' },
+    { key: 'composite', label: 'Composite Kind', width: 'w-44 shrink-0' },
     { key: 'mode', label: 'Mode', width: 'w-24 shrink-0' },
-    { key: 'functions', label: 'Functions', width: 'w-24 shrink-0', hideOnMobile: true },
+    { key: 'functions', label: 'Functions', width: 'w-28 shrink-0', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24 shrink-0' },
   ],
   compositeresourcedefinitions: [
@@ -3277,10 +3287,7 @@ export function ResourcesView({
       }
 
       const distinctCount = Object.keys(valueCounts).length
-      // Only include if 2-20 distinct values (too few = useless, too many = not a filter)
-      // Node column gets a higher cap (50) since clusters commonly have 20-50 nodes
-      const maxDistinct = col.key === 'node' ? 50 : 20
-      if (distinctCount >= 2 && distinctCount <= maxDistinct) {
+      if (isColumnFilterableByDistinctCount(col.key, distinctCount)) {
         filterableColumns.push({
           key: col.key,
           label: col.label,
@@ -3815,7 +3822,7 @@ export function ResourcesView({
               fixedHeaderContent={() => (
                 <tr>
                   {columns.map((col, colIdx) => {
-                    const isSortable = ['name', 'namespace', 'age', 'status', 'ready', 'restarts', 'type', 'version', 'desired', 'available', 'upToDate', 'lastSeen', 'count', 'reason', 'object', 'cpu', 'memory'].includes(col.key)
+                    const isSortable = ['name', 'namespace', 'age', 'status', 'ready', 'restarts', 'type', 'version', 'desired', 'available', 'upToDate', 'lastSeen', 'count', 'reason', 'object', 'cpu', 'memory', 'containers'].includes(col.key)
                     const isSorted = sortColumn === col.key
                     const isLastCol = colIdx === columns.length - 1
                     const filterCol = filterableColumnMap.get(col.key)
@@ -3873,7 +3880,7 @@ export function ResourcesView({
                                     ? 'px-1.5 py-0.5 -my-0.5 selection-strong selection-text hover:bg-skyhook-500/30'
                                     : isFilterOpen
                                       ? 'p-0.5 text-theme-text-primary'
-                                      : 'p-0.5 text-theme-text-disabled opacity-0 group-hover/th:opacity-100 hover:text-theme-text-primary'
+                                      : 'p-0.5 text-theme-text-disabled opacity-40 group-hover/th:opacity-100 hover:text-theme-text-primary'
                                 )}
                               >
                                 <ListFilter className="w-3 h-3" />
