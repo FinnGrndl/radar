@@ -12,6 +12,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/skyhook-io/radar/internal/filter"
@@ -19,6 +20,7 @@ import (
 	"github.com/skyhook-io/radar/internal/issues"
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/internal/search"
+	"github.com/skyhook-io/radar/internal/summarycontext"
 	"github.com/skyhook-io/radar/internal/timeline"
 	aicontext "github.com/skyhook-io/radar/pkg/ai/context"
 	topology "github.com/skyhook-io/radar/pkg/topology"
@@ -315,6 +317,7 @@ type listResourcesInput struct {
 	Kind      string `json:"kind" jsonschema:"resource kind to list, e.g. pods, deployments, services, configmaps"`
 	Group     string `json:"group,omitempty" jsonschema:"API group when the kind is ambiguous (e.g. serving.knative.dev for Knative Service vs core Service)"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"filter to a specific namespace"`
+	Context   string `json:"context,omitempty" jsonschema:"per-row context: omit (default) attaches summaryContext (managedBy + health + issueCount) for triage; 'none' returns bare rows"`
 }
 
 type getResourceInput struct {
@@ -358,6 +361,7 @@ type searchInput struct {
 	Limit   int    `json:"limit,omitempty" jsonschema:"max hits returned (default 50, max 500)"`
 	Include string `json:"include,omitempty" jsonschema:"per-hit detail: summary (default), raw, or none"`
 	Filter  string `json:"filter,omitempty" jsonschema:"optional CEL boolean expression run against each candidate K8s object. Bindings: kind, apiVersion, metadata, spec, status, labels, annotations. Use has(x.y) before optional fields. Examples: 'kind == \"Pod\" && status.phase == \"Failed\"', 'labels[\"app\"] == \"cart\"', 'has(status.readyReplicas) && status.readyReplicas == 0'"`
+	Context string `json:"context,omitempty" jsonschema:"per-hit context: omit (default) attaches summaryContext (managedBy + health + issueCount) for triage; 'none' returns bare hits"`
 }
 
 type issuesInput struct {
@@ -464,13 +468,27 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 		listScope = nil
 	}
 
-	// Try typed cache first
+	// When a group is specified, route straight to the dynamic cache so
+	// CRDs whose plural collides with a core kind (e.g. Knative
+	// serving.knative.dev/Service vs corev1 ""/Service) reach the right
+	// resource. FetchResourceList is group-blind — it would silently
+	// return the core typed list, dropping the caller's group filter on
+	// the floor. Mirrors the group-aware short-circuit in REST
+	// handleAIListResources and handleGetResource (PR #721).
+	if group != "" {
+		return listDynamicResources(ctx, cache, kind, group, listScope, clusterScoped, input.Context)
+	}
+
+	// Try typed cache first (group=="" → core/built-in lookup).
 	objs, err := k8s.FetchResourceList(cache, kind, listScope)
 	if err == k8s.ErrUnknownKind {
 		// Fall through to dynamic cache for CRDs. ClassifyKindScope/SAR
 		// above already authorized cluster-scoped CRDs; namespaced CRDs
-		// are scoped via listScope.
-		return listDynamicResources(ctx, cache, kind, group, listScope)
+		// are scoped via listScope. Pass clusterScoped through so the
+		// issue index drops the namespace filter for cluster-scoped
+		// CRDs — those issues live at namespace="" and would otherwise
+		// be filtered out by the user's namespaced-access set.
+		return listDynamicResources(ctx, cache, kind, group, listScope, clusterScoped, input.Context)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to list %s: %w", kind, err)
@@ -492,28 +510,62 @@ func handleListResources(ctx context.Context, req *mcp.CallToolRequest, input li
 		return nil, nil, fmt.Errorf("failed to minify: %w", err)
 	}
 
+	// Attach summaryContext per row unless caller opted out. Issue index
+	// is scoped to the listed kind so the per-row count reflects only
+	// the resource being listed (not unrelated noise in the namespace).
+	//
+	// Cluster-scoped kinds (Node, PV, cluster-scoped CRDs) emit issues
+	// at namespace="" — scoping the index to the user's namespaced
+	// access set would silently zero issueCount on every row. The
+	// cluster-scoped RBAC gate above (canReadClusterScopedKind) already
+	// authorized the read, so we pass nil here to compose cluster-wide.
+	if input.Context != "none" {
+		idxNamespaces := allowed
+		if clusterScoped {
+			idxNamespaces = nil
+		}
+		if builder := newResourceSummaryContextBuilder(idxNamespaces); builder != nil {
+			summarycontext.AttachToTypedList(results, objs, builder)
+		}
+	}
+
 	return toJSONResult(results)
 }
 
-func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, group string, namespaces []string) (*mcp.CallToolResult, any, error) {
-	var allItems []any
+func listDynamicResources(ctx context.Context, cache *k8s.ResourceCache, kind, group string, namespaces []string, clusterScoped bool, contextMode string) (*mcp.CallToolResult, any, error) {
+	var rawItems []*unstructured.Unstructured
 	if len(namespaces) > 0 {
 		for _, ns := range namespaces {
 			items, err := cache.ListDynamicWithGroup(ctx, kind, ns, group)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to list %s: %w", kind, err)
 			}
-			for _, item := range items {
-				allItems = append(allItems, aicontext.MinifyUnstructured(item, aicontext.LevelSummary))
-			}
+			rawItems = append(rawItems, items...)
 		}
 	} else {
 		items, err := cache.ListDynamicWithGroup(ctx, kind, "", group)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to list %s: %w", kind, err)
 		}
-		for _, item := range items {
-			allItems = append(allItems, aicontext.MinifyUnstructured(item, aicontext.LevelSummary))
+		rawItems = items
+	}
+
+	allItems := make([]any, 0, len(rawItems))
+	for _, item := range rawItems {
+		allItems = append(allItems, aicontext.MinifyUnstructured(item, aicontext.LevelSummary))
+	}
+
+	if contextMode != "none" {
+		// Cluster-scoped CRDs emit issues at namespace="" — passing a
+		// namespace-restricted slice would silently zero issueCount on
+		// every row. Caller has already gated cluster-scoped reads via
+		// canReadClusterScopedKind, so cluster-wide compose is safe.
+		idxNamespaces := namespaces
+		if clusterScoped {
+			idxNamespaces = nil
+		}
+		if builder := newResourceSummaryContextBuilder(idxNamespaces); builder != nil {
+			summarycontext.AttachToUnstructuredList(allItems, rawItems, builder)
 		}
 	}
 
@@ -2047,6 +2099,17 @@ func handleSearch(ctx context.Context, req *mcp.CallToolRequest, input searchInp
 			return nil, nil, fmt.Errorf("filter: %w", err)
 		}
 		opts.Filter = f
+	}
+	// Search uses the dual-index variant: hits are mixed-kind (a single
+	// query can return both namespaced Pods and cluster-scoped Nodes),
+	// so a single namespace-scoped issue index zeroes issueCount on
+	// cluster-scoped hits whose problems live at namespace="". The
+	// builder routes per-hit by scope; CanReadClusterScoped above
+	// already gates which cluster-scoped kinds are reachable.
+	if input.Context != "none" {
+		if builder := newSearchSummaryContextBuilder(scanNamespaces); builder != nil {
+			opts.SummaryBuilder = search.SummaryBuilderFunc(builder)
+		}
 	}
 	result, err := search.Search(ctx, provider, parsed, opts)
 	if err != nil {

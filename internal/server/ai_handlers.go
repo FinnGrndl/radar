@@ -41,6 +41,7 @@ import (
 	"github.com/skyhook-io/radar/internal/audit"
 	"github.com/skyhook-io/radar/internal/issues"
 	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/internal/summarycontext"
 	aicontext "github.com/skyhook-io/radar/pkg/ai/context"
 	bpaudit "github.com/skyhook-io/radar/pkg/audit"
 	"github.com/skyhook-io/radar/pkg/policyreports"
@@ -94,19 +95,33 @@ func parseVerbosity(r *http.Request, defaultLevel aicontext.VerbosityLevel) aico
 }
 
 // handleAIListResources returns a minified list of resources for AI consumption.
-// GET /api/ai/resources/{kind}?namespace=X&group=X&verbosity=summary|detail|compact
+// GET /api/ai/resources/{kind}?namespace=X&group=X&verbosity=summary|detail|compact&context=none
+//
+// summaryContext (managedBy + health + issueCount) is attached per row
+// at Summary verbosity by default. Pass ?context=none to opt out for a
+// bare list.
 func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 	if !s.requireConnected(w) {
 		return
 	}
-	kind := chi.URLParam(r, "kind")
-	namespaces := s.parseNamespacesForUser(r)
-	if noNamespaceAccess(namespaces) {
-		s.writeJSON(w, []any{})
-		return
-	}
+	kind := normalizeKind(chi.URLParam(r, "kind"))
 	group := r.URL.Query().Get("group")
 	level := parseVerbosity(r, aicontext.LevelSummary)
+	skipContext := r.URL.Query().Get("context") == "none"
+
+	// parseNamespacesForUser primes the per-user perm cache. preflightResourceList
+	// then enforces the same RBAC gates as the REST list path (cluster-scoped
+	// SAR for cluster-only kinds, list-namespaces SAR for `kind=namespaces`,
+	// per-namespace and/or cluster-wide list-secrets SAR for `kind=secrets`).
+	// AI callers get an explicit 403 on deny instead of the empty-list shape
+	// the REST handler returns for backward compat.
+	namespaces := s.parseNamespacesForUser(r)
+	finalNamespaces, status, msg, ok := s.preflightResourceList(r, kind, group, namespaces)
+	if !ok {
+		s.writeError(w, status, msg)
+		return
+	}
+	namespaces = finalNamespaces
 
 	cache := k8s.GetResourceCache()
 	if cache == nil {
@@ -114,11 +129,23 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try typed cache first
+	// When a group is specified, route straight to the dynamic cache so
+	// CRDs whose plural collides with a core kind (e.g. Knative
+	// serving.knative.dev/Service vs corev1 ""/Service, KEDA's HPA-like
+	// kinds) reach the right resource. FetchResourceList is group-blind
+	// — it would silently return the core typed list, dropping the
+	// query's group filter on the floor. Mirrors the same group-aware
+	// short-circuit in handleGetResource (PR #721).
+	if group != "" {
+		s.aiListDynamic(w, r, cache, kind, namespaces, group, level, skipContext)
+		return
+	}
+
+	// Try typed cache first (group=="" → core/built-in lookup).
 	objs, err := k8s.FetchResourceList(cache, kind, namespaces)
 	if err == k8s.ErrUnknownKind {
 		// Fall through to dynamic cache for CRDs
-		s.aiListDynamic(w, r, cache, kind, namespaces, group, level)
+		s.aiListDynamic(w, r, cache, kind, namespaces, group, level, skipContext)
 		return
 	}
 	if err != nil {
@@ -136,11 +163,43 @@ func (s *Server) handleAIListResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Attach summaryContext per row at Summary verbosity. Compact/Detail
+	// already carry richer context on the get-resource path; the
+	// per-row attachment is specifically for cheap list triage.
+	//
+	// For cluster-scoped kinds (Node, PV, cluster-scoped CRDs) issues
+	// live at namespace="" — scoping the issue index to the user's
+	// namespace set would silently zero issueCount on every row. The
+	// preflight RBAC above has already authorized cluster-scoped reads,
+	// so we pass nil here to compose cluster-wide.
+	if !skipContext && level == aicontext.LevelSummary {
+		idxNamespaces := issueIndexNamespaces(namespaces, kind, group)
+		if builder := s.newResourceSummaryContextBuilder(idxNamespaces); builder != nil {
+			// Typed list resolves group from each object's TypeMeta —
+			// MinifyList sets it via SetTypeMeta before producing rows,
+			// so we can trust apiVersion on the typed source.
+			summarycontext.AttachToTypedList(results, objs, builder)
+		}
+	}
+
 	s.writeJSON(w, results)
 }
 
+// issueIndexNamespaces returns the namespace slice to scope the issue
+// index by. For cluster-scoped kinds (Node, PV, cluster-scoped CRDs)
+// returns nil so cluster-scoped issues (which live at namespace="") are
+// not filtered out by the user's namespace-restricted access set.
+// Namespaced kinds pass through unchanged.
+func issueIndexNamespaces(namespaces []string, kind, group string) []string {
+	clusterScoped, _, _ := k8s.ClassifyKindScope(kind, group)
+	if clusterScoped {
+		return nil
+	}
+	return namespaces
+}
+
 // aiListDynamic handles the CRD/dynamic fallback for AI list.
-func (s *Server) aiListDynamic(w http.ResponseWriter, r *http.Request, cache *k8s.ResourceCache, kind string, namespaces []string, group string, level aicontext.VerbosityLevel) {
+func (s *Server) aiListDynamic(w http.ResponseWriter, r *http.Request, cache *k8s.ResourceCache, kind string, namespaces []string, group string, level aicontext.VerbosityLevel, skipContext bool) {
 	var allItems []*unstructured.Unstructured
 
 	if len(namespaces) > 0 {
@@ -172,6 +231,13 @@ func (s *Server) aiListDynamic(w http.ResponseWriter, r *http.Request, cache *k8
 	results := make([]any, 0, len(allItems))
 	for _, item := range allItems {
 		results = append(results, aicontext.MinifyUnstructured(item, level))
+	}
+
+	if !skipContext && level == aicontext.LevelSummary {
+		idxNamespaces := issueIndexNamespaces(namespaces, kind, group)
+		if builder := s.newResourceSummaryContextBuilder(idxNamespaces); builder != nil {
+			summarycontext.AttachToUnstructuredList(results, allItems, builder)
+		}
 	}
 
 	s.writeJSON(w, results)
