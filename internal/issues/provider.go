@@ -1,15 +1,10 @@
 package issues
 
 import (
-	"time"
-
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/skyhook-io/radar/internal/k8s"
-	"github.com/skyhook-io/radar/pkg/policyreports"
 )
 
 // CacheProvider adapts radar's in-process caches to the Provider
@@ -65,6 +60,26 @@ func (p *CacheProvider) DetectMissingRefs(namespaces []string) []k8s.Problem {
 	return flattenNamespacedProblems(perNs)
 }
 
+// DetectScheduling fans the three scheduling detectors (bind-time,
+// admission, post-bind) across namespaces. All rows are namespaced, so the
+// flattenNamespacedProblems convention applies unchanged.
+func (p *CacheProvider) DetectScheduling(namespaces []string) []k8s.Problem {
+	detect := func(ns string) []k8s.Problem {
+		out := k8s.DetectSchedulingProblems(p.cache, ns)
+		out = append(out, k8s.DetectAdmissionProblems(p.cache, ns)...)
+		out = append(out, k8s.DetectPostBindProblems(p.cache, ns)...)
+		return out
+	}
+	if len(namespaces) == 0 {
+		return detect("")
+	}
+	perNs := make([][]k8s.Problem, 0, len(namespaces))
+	for _, ns := range namespaces {
+		perNs = append(perNs, detect(ns))
+	}
+	return flattenNamespacedProblems(perNs)
+}
+
 func (p *CacheProvider) DetectCAPIProblems(namespaces []string) []k8s.Problem {
 	if p.dynamic == nil || p.discovery == nil {
 		return nil
@@ -102,53 +117,6 @@ func flattenNamespacedProblems(perNs [][]k8s.Problem) []k8s.Problem {
 	return out
 }
 
-func (p *CacheProvider) WarningEvents(namespaces []string, since time.Duration) []*corev1.Event {
-	if p.cache.Events() == nil {
-		return nil
-	}
-	cutoff := time.Time{}
-	if since > 0 {
-		cutoff = time.Now().Add(-since)
-	}
-	collect := func(ns string) []*corev1.Event {
-		var lst []*corev1.Event
-		var err error
-		if ns == "" {
-			lst, err = p.cache.Events().List(labels.Everything())
-		} else {
-			lst, err = p.cache.Events().Events(ns).List(labels.Everything())
-		}
-		if err != nil {
-			return nil
-		}
-		out := make([]*corev1.Event, 0, len(lst))
-		for _, e := range lst {
-			if e.Type != corev1.EventTypeWarning {
-				continue
-			}
-			if !cutoff.IsZero() {
-				last := e.LastTimestamp.Time
-				if last.IsZero() {
-					last = e.EventTime.Time
-				}
-				if last.Before(cutoff) {
-					continue
-				}
-			}
-			out = append(out, e)
-		}
-		return out
-	}
-	if len(namespaces) == 0 {
-		return collect("")
-	}
-	var merged []*corev1.Event
-	for _, ns := range namespaces {
-		merged = append(merged, collect(ns)...)
-	}
-	return merged
-}
-
 func (p *CacheProvider) WatchedDynamic() []schema.GroupVersionResource {
 	if p.dynamic == nil {
 		return nil
@@ -161,21 +129,6 @@ func (p *CacheProvider) ListDynamic(gvr schema.GroupVersionResource, namespace s
 		return nil, nil
 	}
 	return p.dynamic.List(gvr, namespace)
-}
-
-func (p *CacheProvider) KyvernoFindings() []policyreports.SubjectFindings {
-	idx := k8s.GetPolicyReportIndex()
-	if idx == nil {
-		return nil
-	}
-	return idx.All()
-}
-
-// KyvernoStatus is a thin string-typed wrapper around k8s.GetKyvernoStatus
-// so the issues package doesn't need to depend on the k8s package for the
-// enum. Values are the constants documented on k8s.KyvernoStatus.
-func (p *CacheProvider) KyvernoStatus() string {
-	return string(k8s.GetKyvernoStatus())
 }
 
 func (p *CacheProvider) KindForGVR(gvr schema.GroupVersionResource) string {

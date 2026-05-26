@@ -46,8 +46,27 @@ type diagnoseResponse struct {
 	LogsError       string                           `json:"logsError,omitempty"`
 	Events          []aicontext.DeduplicatedEvent    `json:"events,omitempty"`
 	EventsError     string                           `json:"eventsError,omitempty"`
-	Pods            int                              `json:"pods"`
-	NarrowHint      string                           `json:"narrowHint,omitempty"`
+	// StartupBlockers carries why the workload can't reach Running when that's
+	// the failure mode, spanning the whole pre-Running path: unschedulable pods
+	// (offending node constraint named), admission rejections (quota/
+	// PodSecurity/webhook — where no Pod is created), or post-bind CNI/volume
+	// stalls. Empty when the workload starts fine. Named for the symptom
+	// ("can't start"), not the subsystem — "scheduling" alone would mislead,
+	// since it also covers admission and post-bind.
+	StartupBlockers []startupBlocker `json:"startupBlockers,omitempty"`
+	Pods            int              `json:"pods"`
+	NarrowHint      string           `json:"narrowHint,omitempty"`
+}
+
+// startupBlocker is the compact row diagnose embeds for one reason a workload
+// can't reach Running — the same signal the issues tool emits, scoped here to
+// this workload (bind-time, admission, or post-bind).
+type startupBlocker struct {
+	Kind     string `json:"kind"`
+	Name     string `json:"name"`
+	Reason   string `json:"reason"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
 }
 
 // maxDiagnosePods caps the log fan-out so large DaemonSets / Deployments
@@ -194,7 +213,65 @@ func handleDiagnose(ctx context.Context, _ *mcp.CallToolRequest, input diagnoseI
 	if eventsErr != nil {
 		resp.EventsError = eventsErr.Error()
 	}
+
+	resp.StartupBlockers = startupBlockersForWorkload(cache, kindNorm, input.Namespace, input.Name, pods)
 	return toJSONResult(resp)
+}
+
+// startupBlockersForWorkload runs the pre-Running detectors over the namespace
+// and keeps the rows relevant to THIS workload: its own pods (bind-time /
+// post-bind) and admission FailedCreate on the workload or its ReplicaSet.
+// Namespace-scoped findings that aren't tied to this workload (the prior
+// blanket "any ResourceQuota" case) are deliberately excluded — attaching a
+// namespace's quota state to an unrelated workload over-attributes failures.
+func startupBlockersForWorkload(cache *k8s.ResourceCache, kind, namespace, name string, pods []*corev1.Pod) []startupBlocker {
+	all := k8s.DetectSchedulingProblems(cache, namespace)
+	all = append(all, k8s.DetectAdmissionProblems(cache, namespace)...)
+	all = append(all, k8s.DetectPostBindProblems(cache, namespace)...)
+	if len(all) == 0 {
+		return nil
+	}
+
+	podNames := make(map[string]bool, len(pods))
+	for _, p := range pods {
+		podNames[p.Name] = true
+	}
+	dispKind := normalizeDisplayKind(kind)
+
+	var out []startupBlocker
+	for _, p := range all {
+		relevant := false
+		switch {
+		case p.Kind == "Pod" && podNames[p.Name]:
+			relevant = true
+		case p.Kind == dispKind && p.Name == name:
+			relevant = true // FailedCreate on the workload itself (StatefulSet/DaemonSet)
+		case dispKind == "Deployment" && p.Kind == "ReplicaSet" && isReplicaSetOf(p.Name, name):
+			relevant = true // FailedCreate on the Deployment's ReplicaSet
+		}
+		if !relevant {
+			continue
+		}
+		out = append(out, startupBlocker{
+			Kind:     p.Kind,
+			Name:     p.Name,
+			Reason:   p.Reason,
+			Severity: p.Severity,
+			Message:  p.Message,
+		})
+	}
+	return out
+}
+
+// isReplicaSetOf reports whether rsName belongs to the given Deployment.
+// Deployment ReplicaSets are named "<deployment>-<podTemplateHash>" with a
+// single hyphen-free hash segment, so we require exactly one trailing segment
+// after "<deployment>-". This avoids a prefix false-match against a sibling
+// Deployment that merely shares the prefix (diagnosing "api" must not claim
+// "api-gateway-<hash>", which belongs to Deployment "api-gateway").
+func isReplicaSetOf(rsName, deployName string) bool {
+	suffix, ok := strings.CutPrefix(rsName, deployName+"-")
+	return ok && suffix != "" && !strings.Contains(suffix, "-")
 }
 
 // normalizeDiagnoseKind accepts pod/deployment/statefulset/daemonset in any

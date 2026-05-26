@@ -4,19 +4,22 @@
 //     (failing Deployments, NotReady Nodes, pending PVCs…)
 //   - missing_ref — direct by-name references to objects that do not exist
 //     (missing PVCs, ConfigMaps, Secrets, backend Services, roleRefs…)
+//   - scheduling — why a Pod can't run: unschedulable (arch/taint/resources/
+//     affinity, with the offending node label named), rejected at admission
+//     (quota/LimitRange/PodSecurity/webhook — no Pod is even created), or
+//     stuck post-bind (CNI IP exhaustion, volume attach/mount)
 //   - condition  — generic CRD .status.conditions[].status=False fallback
 //     (Argo/Flux/Knative/Crossplane/cert-manager/KEDA)
-//   - event      — recent K8s Warning events (opt-in; noisy)
-//   - kyverno    — PolicyReport findings (opt-in)
 //
-// All five describe LIVE OPERATIONAL STATE — "what is failing right
-// now". Static best-practice/posture findings (runAsRoot, missing
-// probes, no PDB, deprecated APIs, …) are a separate axis and live
-// in pkg/audit + /api/audit + MCP get_cluster_audit. The two are NOT
-// composed here: a healthy pod can have many audit findings, a
-// crashing pod can have zero. Combining them would force consumers
-// to disambiguate "is this critical operational or critical posture?"
-// at every callsite.
+// All four describe LIVE OPERATIONAL STATE — "what is failing right
+// now". Two adjacent signals are deliberately NOT composed here, each
+// with its own home: raw K8s Warning events (get_events + the timeline)
+// and policy/posture — Kyverno PolicyReports + static best-practice
+// findings (runAsRoot, missing probes, no PDB, deprecated APIs, …) which
+// live in pkg/audit + /api/audit + MCP get_cluster_audit. A healthy pod
+// can have many audit findings, a crashing pod can have zero. Combining
+// them would force consumers to disambiguate "is this critical
+// operational or critical posture?" at every callsite.
 //
 // The Issue type is what /api/issues and the hub's fleet_issues MCP
 // tool emit. Severity is normalized to a 3-tier vocabulary
@@ -36,8 +39,8 @@ type CELFilter = filter.Filter
 
 // Severity is the normalized 3-tier severity. Mapping rules:
 //
-//	critical = problem.critical | kyverno.fail|error
-//	warning  = problem.<any non-critical> | event.Warning | CRD-condition False | kyverno.warn
+//	critical = problem.critical
+//	warning  = problem.<any non-critical> | CRD-condition False
 //	info     = reserved (currently unused)
 //
 // problem severities other than "critical" all collapse to warning — see
@@ -50,17 +53,17 @@ const (
 	SeverityWarning  Severity = "warning"
 )
 
-// Source records which underlying detection channel emitted this
-// issue. Useful for filtering ("only show me problems, not events")
-// and for SPA copy that explains why a row appeared.
+// Source records which underlying detection channel emitted this issue.
+// It is an OUTPUT label (for SPA copy that explains why a row appeared,
+// and as a CEL filter binding), not an input filter — issues composes all
+// four sources unconditionally; detection provenance is not a triage axis.
 type Source string
 
 const (
 	SourceProblem    Source = "problem"     // radar's hardcoded per-kind detection
 	SourceMissingRef Source = "missing_ref" // dangling-ref detection (Pod→missing PVC/CM/Secret/SA, HPA→missing target, Ingress→missing backend, etc.)
-	SourceEvent      Source = "event"       // K8s Warning events (recent)
+	SourceScheduling Source = "scheduling"  // placement/admission/post-bind failures (unschedulable, quota/PodSecurity/webhook, CNI/volume)
 	SourceCondition  Source = "condition"   // generic CRD .status.conditions[].status=False fallback
-	SourceKyverno    Source = "kyverno"     // Kyverno PolicyReport findings (opt-in)
 )
 
 // Ref is a lightweight resource reference, used for owner pointers.
@@ -72,10 +75,10 @@ type Ref struct {
 
 // Issue is the unified cluster-health record.
 //
-// FirstSeen / LastSeen / Count are populated for events (which arrive
-// pre-aggregated from the K8s API). For problems, conditions, and
-// Kyverno findings, FirstSeen and LastSeen are both the snapshot time
-// and Count = 1.
+// All current sources are snapshot-derived with Count = 1. For problem /
+// missing_ref / scheduling, LastSeen is the compose time and FirstSeen backs
+// off by the observed problem duration; for condition rows, both timestamps
+// are the condition's lastTransitionTime.
 type Issue struct {
 	Severity  Severity  `json:"severity"`
 	Source    Source    `json:"source"`
@@ -107,33 +110,13 @@ type Issue struct {
 type Filters struct {
 	Namespaces []string
 	Severities []Severity
-	Sources    []Source
 	Kinds      []string
-	// Since restricts event-source issues to this lookback window.
-	// Other sources are always current-snapshot, so this only affects
-	// SourceEvent. Zero means "no time restriction" (all cached events).
-	Since time.Duration
 	// Limit caps the returned slice. Zero means default (200).
 	Limit int
-	// IncludeEvents defaults to false. Warning events are the noisiest
-	// source by an order of magnitude — a single broken Pod emits a
-	// FailedScheduling / BackOff / etc. Event every few seconds, and
-	// the event informer retains them for the cache window (default 1h+).
-	// On a multi-thousand-Pod cluster this floods the Issue list with
-	// rows that mostly duplicate `problem` source (a CrashLoopBackOff
-	// Pod already shows up under SourceProblem). Treat events as opt-in;
-	// when enabled the caller should also pass a Since window (handler
-	// defaults to 1h when events are on and Since is zero).
-	IncludeEvents bool
-	// IncludeKyverno defaults to false. Kyverno PolicyReport findings
-	// are loud (a baseline cluster-pss profile alone emits 10+ findings
-	// per workload) and the default Issue view should not be dominated
-	// by best-practice/policy noise. Opt in via include_kyverno=true
-	// or by passing "kyverno" in the source list.
-	IncludeKyverno bool
 	// Filter is an optional compiled CEL predicate evaluated against
-	// each composed Issue's row bindings. Compile happens in the
-	// handler (and is cached); this layer just runs the program.
+	// each composed Issue's row bindings (source is exposed there, so a
+	// power user can still slice by detection method). Compile happens in
+	// the handler (and is cached); this layer just runs the program.
 	Filter *CELFilter
 	// CanReadClusterScoped authorizes cluster-scoped Issue rows before
 	// they are returned. Handlers provide a per-user SAR-backed predicate;

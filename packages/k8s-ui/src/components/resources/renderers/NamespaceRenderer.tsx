@@ -1,8 +1,10 @@
-import { Shield, Box, Users } from 'lucide-react'
+import { Shield, Box, Users, Gauge } from 'lucide-react'
 import { clsx } from 'clsx'
 import { Section, PropertyList, Property, ResourceLink } from '../../ui/drawer-components'
 import type { RBACNamespaceResponse, RBACBindingWithSubjects, RBACSubject, ResourceRef } from '../../../types'
 import { rbacKindBadgeClass } from '../../../utils/rbac-badges'
+import { SEVERITY_TEXT, SEVERITY_DOT } from '../../../utils/badge-colors'
+import { parseCPUToNanocores, parseMemoryToBytes } from '../../../utils/format'
 
 interface NamespaceRendererProps {
   data: any
@@ -14,10 +16,23 @@ interface NamespaceRendererProps {
   rbacData?: RBACNamespaceResponse | null
   rbacLoading?: boolean
   rbacError?: Error | null
+  /**
+   * ResourceQuota objects for this namespace (from /api/resources/
+   * resourcequotas?namespace=). Undefined when the host hasn't wired the
+   * fetch (quota section omitted). A saturated quota is exactly why a
+   * namespace stops admitting pods, yet it's shown nowhere else.
+   */
+  quotaData?: any[] | null
+  /**
+   * Non-403 quota fetch error. When set, the quota section renders a note
+   * instead of silently disappearing — so a quota-constrained namespace whose
+   * fetch 500/503s isn't mistaken for quota-free. (403 stays hidden upstream.)
+   */
+  quotaError?: Error | null
   onNavigate?: (ref: ResourceRef) => void
 }
 
-export function NamespaceRenderer({ data, rbacData, rbacLoading, rbacError, onNavigate }: NamespaceRendererProps) {
+export function NamespaceRenderer({ data, rbacData, rbacLoading, rbacError, quotaData, quotaError, onNavigate }: NamespaceRendererProps) {
   const metadata = data.metadata || {}
   const status = data.status || {}
   const phase = status.phase
@@ -48,6 +63,11 @@ export function NamespaceRenderer({ data, rbacData, rbacLoading, rbacError, onNa
         </PropertyList>
       </Section>
 
+      {/* ResourceQuota usage — only when host wired the fetch. */}
+      {(quotaError || (quotaData != null && quotaData.length > 0)) && (
+        <NamespaceQuotaSection quotas={quotaData ?? []} error={quotaError ?? null} />
+      )}
+
       {/* RBAC summary — only when host wired the fetch. */}
       {rbacData !== undefined && (
         <NamespaceRBACSection
@@ -58,6 +78,89 @@ export function NamespaceRenderer({ data, rbacData, rbacLoading, rbacError, onNa
         />
       )}
     </>
+  )
+}
+
+// ============================================================================
+// NAMESPACE QUOTA SECTION
+// ============================================================================
+// Shows ResourceQuota saturation — the signal that answers "why did this
+// namespace stop admitting pods?" A quota at its hard limit blocks every new
+// pod the namespace tries to create, with no failing Pod to inspect (the
+// controller's FailedCreate event is the only trace). Surfacing usage here
+// turns that invisible failure into a glanceable bar.
+
+// quotaUsageRatio parses a used/hard pair for a quota resource, picking the
+// right unit parser by resource name (cpu → millicores, memory/storage →
+// bytes, everything else → plain count). Returns null when hard is unset or
+// unparseable so the row falls back to showing the raw strings.
+function quotaUsageRatio(resourceName: string, used: string, hard: string): number | null {
+  if (!hard) return null
+  const isCPU = /(^|\.)cpu$/i.test(resourceName)
+  const isBytes = /(memory|storage)$/i.test(resourceName)
+  const parse = isCPU ? parseCPUToNanocores : isBytes ? parseMemoryToBytes : (v: string) => parseFloat(v) || 0
+  const h = parse(hard)
+  if (!h) return null
+  return parse(used || '0') / h
+}
+
+function NamespaceQuotaSection({ quotas, error }: { quotas: any[]; error?: Error | null }) {
+  return (
+    <Section title="Resource Quotas" icon={Gauge} defaultExpanded>
+      {error && (
+        <div className="text-xs text-theme-text-secondary">
+          Couldn’t load resource quotas — retry shortly. A quota at its limit blocks new pods in this namespace.
+        </div>
+      )}
+      <div className="space-y-3">
+        {quotas.map((q: any, qi: number) => {
+          const name = q?.metadata?.name ?? `quota-${qi}`
+          const hard: Record<string, string> = q?.status?.hard ?? q?.spec?.hard ?? {}
+          const used: Record<string, string> = q?.status?.used ?? {}
+          const resourceNames = Object.keys(hard).sort()
+          return (
+            <div key={name} className="card-inner">
+              <div className="text-xs font-medium text-theme-text-primary mb-1.5">{name}</div>
+              {resourceNames.length === 0 ? (
+                <div className="text-xs text-theme-text-secondary">No hard limits set.</div>
+              ) : (
+                <div className="space-y-1">
+                  {resourceNames.map((res) => {
+                    const ratio = quotaUsageRatio(res, used[res] ?? '0', hard[res])
+                    const pct = ratio === null ? null : Math.min(100, Math.round(ratio * 100))
+                    const tone =
+                      ratio === null ? SEVERITY_TEXT.neutral
+                        : ratio >= 1 ? SEVERITY_TEXT.error
+                          : ratio >= 0.9 ? SEVERITY_TEXT.alert
+                            : SEVERITY_TEXT.neutral
+                    const barTone =
+                      ratio === null ? 'bg-theme-border'
+                        : ratio >= 1 ? SEVERITY_DOT.error
+                          : ratio >= 0.9 ? SEVERITY_DOT.alert
+                            : 'bg-theme-text-tertiary'
+                    return (
+                      <div key={res} className="text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-theme-text-secondary truncate">{res}</span>
+                          <span className={clsx('shrink-0 tabular-nums', tone)}>
+                            {used[res] ?? '0'} / {hard[res]}{pct !== null && ` (${pct}%)`}
+                          </span>
+                        </div>
+                        {pct !== null && (
+                          <div className="mt-0.5 h-1 rounded-full bg-theme-base overflow-hidden">
+                            <div className={clsx('h-full rounded-full', barTone)} style={{ width: `${pct}%` }} />
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </Section>
   )
 }
 
