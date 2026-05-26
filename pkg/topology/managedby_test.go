@@ -23,15 +23,21 @@ type stubDP struct {
 func (s *stubDP) List(_ schema.GroupVersionResource, _ string) ([]*unstructured.Unstructured, error) {
 	return nil, nil
 }
+func (s *stubDP) ListNamespaces(_ schema.GroupVersionResource, _ []string) ([]*unstructured.Unstructured, error) {
+	return nil, nil
+}
 func (s *stubDP) Get(_ schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error) {
 	if u, ok := s.obj[namespace+"/"+name]; ok {
 		return u, nil
 	}
 	return nil, nil
 }
-func (s *stubDP) GetWatchedResources() []schema.GroupVersionResource          { return nil }
-func (s *stubDP) GetDiscoveryStatus() k8score.CRDDiscoveryStatus { return k8score.CRDDiscoveryIdle }
-func (s *stubDP) GetGVR(kindOrName string) (schema.GroupVersionResource, bool) { g, ok := s.gvr[kindOrName]; return g, ok }
+func (s *stubDP) GetWatchedResources() []schema.GroupVersionResource { return nil }
+func (s *stubDP) GetDiscoveryStatus() k8score.CRDDiscoveryStatus     { return k8score.CRDDiscoveryIdle }
+func (s *stubDP) GetGVR(kindOrName string) (schema.GroupVersionResource, bool) {
+	g, ok := s.gvr[kindOrName]
+	return g, ok
+}
 func (s *stubDP) GetGVRWithGroup(kindOrName, _ string) (schema.GroupVersionResource, bool) {
 	return s.GetGVR(kindOrName)
 }

@@ -330,7 +330,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		rolloutGVR, hasRollouts = resourceDiscovery.GetGVR("Rollout")
 	}
 	if hasRollouts && dynamicCache != nil {
-		rollouts, err := dynamicCache.List(rolloutGVR, opts.NamespaceFilter())
+		rollouts, err := dynamicCache.ListNamespaces(rolloutGVR, opts.Namespaces)
 		if err != nil {
 			log.Printf("WARNING [topology] Failed to list Rollouts: %v", err)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Rollouts: %v", err))
@@ -414,7 +414,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	var applicationResources []*unstructured.Unstructured // Store for second pass
 	applicationDestNamespaces := make(map[string]string)  // appID -> destNamespace
 	if hasApplications && dynamicCache != nil {
-		applications, err := dynamicCache.List(applicationGVR, opts.NamespaceFilter())
+		applications, err := dynamicCache.ListNamespaces(applicationGVR, opts.Namespaces)
 		if err != nil {
 			log.Printf("WARNING [topology] Failed to list ArgoCD Applications: %v", err)
 			warnings = append(warnings, fmt.Sprintf("Failed to list ArgoCD Applications: %v", err))
@@ -510,7 +510,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	kustomizationIDs := make(map[string]string)             // ns/name -> kustomizationID
 	var kustomizationResources []*unstructured.Unstructured // Store for second pass
 	if hasKustomizations && dynamicCache != nil {
-		kustomizations, err := dynamicCache.List(kustomizationGVR, opts.NamespaceFilter())
+		kustomizations, err := dynamicCache.ListNamespaces(kustomizationGVR, opts.Namespaces)
 		if err != nil {
 			log.Printf("WARNING [topology] Failed to list FluxCD Kustomizations: %v", err)
 			warnings = append(warnings, fmt.Sprintf("Failed to list FluxCD Kustomizations: %v", err))
@@ -580,7 +580,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	}
 	gitRepoIDs := make(map[string]string) // ns/name -> gitRepoID
 	if hasGitRepos && dynamicCache != nil {
-		gitRepos, err := dynamicCache.List(gitRepoGVR, opts.NamespaceFilter())
+		gitRepos, err := dynamicCache.ListNamespaces(gitRepoGVR, opts.Namespaces)
 		if err != nil {
 			log.Printf("WARNING [topology] Failed to list FluxCD GitRepositories: %v", err)
 			warnings = append(warnings, fmt.Sprintf("Failed to list FluxCD GitRepositories: %v", err))
@@ -645,7 +645,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	}
 	helmReleaseIDs := make(map[string]string) // ns/name -> helmReleaseID
 	if hasHelmReleases && dynamicCache != nil {
-		helmReleases, err := dynamicCache.List(helmReleaseGVR, opts.NamespaceFilter())
+		helmReleases, err := dynamicCache.ListNamespaces(helmReleaseGVR, opts.Namespaces)
 		if err != nil {
 			log.Printf("WARNING [topology] Failed to list FluxCD HelmReleases: %v", err)
 			warnings = append(warnings, fmt.Sprintf("Failed to list FluxCD HelmReleases: %v", err))
@@ -718,7 +718,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	}
 	var certificateResources []unstructured.Unstructured
 	if hasCertificates && dynamicCache != nil {
-		certs, certErr := dynamicCache.List(certificateGVR, opts.NamespaceFilter())
+		certs, certErr := dynamicCache.ListNamespaces(certificateGVR, opts.Namespaces)
 		if certErr != nil {
 			log.Printf("WARNING [topology] Failed to list cert-manager Certificates: %v", certErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list cert-manager Certificates: %v", certErr))
@@ -757,7 +757,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	}
 	var cachedNodePools []*unstructured.Unstructured // reused for NodePool→NodeClass edges
 	if hasNodePools && dynamicCache != nil {
-		nodePools, npErr := dynamicCache.List(nodePoolGVR, opts.NamespaceFilter())
+		nodePools, npErr := dynamicCache.ListNamespaces(nodePoolGVR, opts.Namespaces)
 		if npErr != nil {
 			log.Printf("WARNING [topology] Failed to list Karpenter NodePools: %v", npErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Karpenter NodePools: %v", npErr))
@@ -792,7 +792,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		nodeClaimGVR, hasNodeClaims = resourceDiscovery.GetGVR("NodeClaim")
 	}
 	if hasNodeClaims && dynamicCache != nil {
-		nodeClaims, ncErr := dynamicCache.List(nodeClaimGVR, opts.NamespaceFilter())
+		nodeClaims, ncErr := dynamicCache.ListNamespaces(nodeClaimGVR, opts.Namespaces)
 		if ncErr != nil {
 			log.Printf("WARNING [topology] Failed to list Karpenter NodeClaims: %v", ncErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Karpenter NodeClaims: %v", ncErr))
@@ -957,7 +957,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		scaledObjectGVR, hasScaledObjects = resourceDiscovery.GetGVR("ScaledObject")
 	}
 	if hasScaledObjects && dynamicCache != nil {
-		scaledObjects, soErr := dynamicCache.List(scaledObjectGVR, opts.NamespaceFilter())
+		scaledObjects, soErr := dynamicCache.ListNamespaces(scaledObjectGVR, opts.Namespaces)
 		if soErr != nil {
 			log.Printf("WARNING [topology] Failed to list KEDA ScaledObjects: %v", soErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KEDA ScaledObjects: %v", soErr))
@@ -1017,7 +1017,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		scaledJobGVR, hasScaledJobs = resourceDiscovery.GetGVR("ScaledJob")
 	}
 	if hasScaledJobs && dynamicCache != nil {
-		scaledJobs, sjErr := dynamicCache.List(scaledJobGVR, opts.NamespaceFilter())
+		scaledJobs, sjErr := dynamicCache.ListNamespaces(scaledJobGVR, opts.Namespaces)
 		if sjErr != nil {
 			log.Printf("WARNING [topology] Failed to list KEDA ScaledJobs: %v", sjErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KEDA ScaledJobs: %v", sjErr))
@@ -1054,7 +1054,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		capiClusterGVR, hasCAPIClusters = resourceDiscovery.GetGVRWithGroup("Cluster", "cluster.x-k8s.io")
 	}
 	if hasCAPIClusters && dynamicCache != nil {
-		clusters, clErr := dynamicCache.List(capiClusterGVR, opts.NamespaceFilter())
+		clusters, clErr := dynamicCache.ListNamespaces(capiClusterGVR, opts.Namespaces)
 		if clErr != nil {
 			log.Printf("WARNING [topology] Failed to list CAPI Clusters: %v", clErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list CAPI Clusters: %v", clErr))
@@ -1090,7 +1090,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		capiClusterClassGVR, hasCAPIClusterClasses = resourceDiscovery.GetGVR("ClusterClass")
 	}
 	if hasCAPIClusterClasses && dynamicCache != nil {
-		clusterClasses, ccErr := dynamicCache.List(capiClusterClassGVR, opts.NamespaceFilter())
+		clusterClasses, ccErr := dynamicCache.ListNamespaces(capiClusterClassGVR, opts.Namespaces)
 		if ccErr != nil {
 			log.Printf("WARNING [topology] Failed to list CAPI ClusterClasses: %v", ccErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list CAPI ClusterClasses: %v", ccErr))
@@ -1156,7 +1156,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		kcpGVR, hasKCPs = resourceDiscovery.GetGVR("KubeadmControlPlane")
 	}
 	if hasKCPs && dynamicCache != nil {
-		kcps, kcpErr := dynamicCache.List(kcpGVR, opts.NamespaceFilter())
+		kcps, kcpErr := dynamicCache.ListNamespaces(kcpGVR, opts.Namespaces)
 		if kcpErr != nil {
 			log.Printf("WARNING [topology] Failed to list CAPI KubeadmControlPlanes: %v", kcpErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list CAPI KubeadmControlPlanes: %v", kcpErr))
@@ -1205,7 +1205,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		mdGVR, hasMDs = resourceDiscovery.GetGVR("MachineDeployment")
 	}
 	if hasMDs && dynamicCache != nil {
-		mds, mdErr := dynamicCache.List(mdGVR, opts.NamespaceFilter())
+		mds, mdErr := dynamicCache.ListNamespaces(mdGVR, opts.Namespaces)
 		if mdErr != nil {
 			log.Printf("WARNING [topology] Failed to list CAPI MachineDeployments: %v", mdErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list CAPI MachineDeployments: %v", mdErr))
@@ -1254,7 +1254,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		mpGVR, hasMPs = resourceDiscovery.GetGVR("MachinePool")
 	}
 	if hasMPs && dynamicCache != nil {
-		mps, mpErr := dynamicCache.List(mpGVR, opts.NamespaceFilter())
+		mps, mpErr := dynamicCache.ListNamespaces(mpGVR, opts.Namespaces)
 		if mpErr != nil {
 			log.Printf("WARNING [topology] Failed to list CAPI MachinePools: %v", mpErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list CAPI MachinePools: %v", mpErr))
@@ -1303,7 +1303,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		capiMsGVR, hasCAPIMachineSets = resourceDiscovery.GetGVRWithGroup("MachineSet", "cluster.x-k8s.io")
 	}
 	if hasCAPIMachineSets && dynamicCache != nil {
-		machineSets, msErr := dynamicCache.List(capiMsGVR, opts.NamespaceFilter())
+		machineSets, msErr := dynamicCache.ListNamespaces(capiMsGVR, opts.Namespaces)
 		if msErr != nil {
 			log.Printf("WARNING [topology] Failed to list CAPI MachineSets: %v", msErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list CAPI MachineSets: %v", msErr))
@@ -1352,7 +1352,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		capiMachineGVR, hasCAPIMachines = resourceDiscovery.GetGVRWithGroup("Machine", "cluster.x-k8s.io")
 	}
 	if hasCAPIMachines && dynamicCache != nil {
-		machines, mErr := dynamicCache.List(capiMachineGVR, opts.NamespaceFilter())
+		machines, mErr := dynamicCache.ListNamespaces(capiMachineGVR, opts.Namespaces)
 		if mErr != nil {
 			log.Printf("WARNING [topology] Failed to list CAPI Machines: %v", mErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list CAPI Machines: %v", mErr))
@@ -1447,7 +1447,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		mhcGVR, hasMHCs = resourceDiscovery.GetGVR("MachineHealthCheck")
 	}
 	if hasMHCs && dynamicCache != nil {
-		mhcs, mhcErr := dynamicCache.List(mhcGVR, opts.NamespaceFilter())
+		mhcs, mhcErr := dynamicCache.ListNamespaces(mhcGVR, opts.Namespaces)
 		if mhcErr != nil {
 			log.Printf("WARNING [topology] Failed to list CAPI MachineHealthChecks: %v", mhcErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list CAPI MachineHealthChecks: %v", mhcErr))
@@ -1529,7 +1529,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	virtualServiceIDs := make(map[string]string)             // ns/name -> vsID
 	var virtualServiceResources []*unstructured.Unstructured // Store for second pass
 	if hasVirtualServices && dynamicCache != nil {
-		virtualServices, vsErr := dynamicCache.List(virtualServiceGVR, opts.NamespaceFilter())
+		virtualServices, vsErr := dynamicCache.ListNamespaces(virtualServiceGVR, opts.Namespaces)
 		if vsErr != nil {
 			log.Printf("WARNING [topology] Failed to list Istio VirtualServices: %v", vsErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Istio VirtualServices: %v", vsErr))
@@ -1588,7 +1588,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	destinationRuleIDs := make(map[string]string)             // ns/name -> drID
 	var destinationRuleResources []*unstructured.Unstructured // Store for second pass
 	if hasDestinationRules && dynamicCache != nil {
-		destinationRules, drErr := dynamicCache.List(destinationRuleGVR, opts.NamespaceFilter())
+		destinationRules, drErr := dynamicCache.ListNamespaces(destinationRuleGVR, opts.Namespaces)
 		if drErr != nil {
 			log.Printf("WARNING [topology] Failed to list Istio DestinationRules: %v", drErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Istio DestinationRules: %v", drErr))
@@ -1638,7 +1638,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	}
 	istioGatewayIDs := make(map[string]string) // ns/name -> igwID
 	if hasIstioGateways && dynamicCache != nil {
-		istioGateways, igwErr := dynamicCache.List(istioGatewayGVR, opts.NamespaceFilter())
+		istioGateways, igwErr := dynamicCache.ListNamespaces(istioGatewayGVR, opts.Namespaces)
 		if igwErr != nil {
 			log.Printf("WARNING [topology] Failed to list Istio Gateways: %v", igwErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Istio Gateways: %v", igwErr))
@@ -1690,7 +1690,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	knativeServiceIDs := make(map[string]string)             // ns/name -> ksvcID
 	var knativeServiceResources []*unstructured.Unstructured // Store for second pass
 	if hasKnativeServices && dynamicCache != nil {
-		knativeServices, ksvcErr := dynamicCache.List(knativeServiceGVR, opts.NamespaceFilter())
+		knativeServices, ksvcErr := dynamicCache.ListNamespaces(knativeServiceGVR, opts.Namespaces)
 		if ksvcErr != nil {
 			log.Printf("WARNING [topology] Failed to list KNative Services: %v", ksvcErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KNative Services: %v", ksvcErr))
@@ -1730,7 +1730,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	knativeConfigIDs := make(map[string]string)             // ns/name -> kcfgID
 	var knativeConfigResources []*unstructured.Unstructured // Store for edge creation
 	if hasKnativeConfigs && dynamicCache != nil {
-		knativeConfigs, kcfgErr := dynamicCache.List(knativeConfigGVR, opts.NamespaceFilter())
+		knativeConfigs, kcfgErr := dynamicCache.ListNamespaces(knativeConfigGVR, opts.Namespaces)
 		if kcfgErr != nil {
 			log.Printf("WARNING [topology] Failed to list KNative Configurations: %v", kcfgErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KNative Configurations: %v", kcfgErr))
@@ -1769,7 +1769,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	knativeRevisionIDs := make(map[string]string)             // ns/name -> krevID
 	var knativeRevisionResources []*unstructured.Unstructured // Store for edge creation
 	if hasKnativeRevisions && dynamicCache != nil {
-		knativeRevisions, krevErr := dynamicCache.List(knativeRevisionGVR, opts.NamespaceFilter())
+		knativeRevisions, krevErr := dynamicCache.ListNamespaces(knativeRevisionGVR, opts.Namespaces)
 		if krevErr != nil {
 			log.Printf("WARNING [topology] Failed to list KNative Revisions: %v", krevErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KNative Revisions: %v", krevErr))
@@ -1808,7 +1808,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	knativeRouteIDs := make(map[string]string)             // ns/name -> krouteID
 	var knativeRouteResources []*unstructured.Unstructured // Store for second pass
 	if hasKnativeRoutes && dynamicCache != nil {
-		knativeRoutes, krouteErr := dynamicCache.List(knativeRouteGVR, opts.NamespaceFilter())
+		knativeRoutes, krouteErr := dynamicCache.ListNamespaces(knativeRouteGVR, opts.Namespaces)
 		if krouteErr != nil {
 			log.Printf("WARNING [topology] Failed to list KNative Routes: %v", krouteErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KNative Routes: %v", krouteErr))
@@ -1850,7 +1850,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	}
 	knativeBrokerIDs := make(map[string]string) // ns/name -> brokerID
 	if hasKnativeBrokers && dynamicCache != nil {
-		knativeBrokers, brokerErr := dynamicCache.List(knativeBrokerGVR, opts.NamespaceFilter())
+		knativeBrokers, brokerErr := dynamicCache.ListNamespaces(knativeBrokerGVR, opts.Namespaces)
 		if brokerErr != nil {
 			log.Printf("WARNING [topology] Failed to list KNative Brokers: %v", brokerErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KNative Brokers: %v", brokerErr))
@@ -1888,7 +1888,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	knativeTriggerIDs := make(map[string]string)             // ns/name -> triggerID
 	var knativeTriggerResources []*unstructured.Unstructured // Store for second pass
 	if hasKnativeTriggers && dynamicCache != nil {
-		knativeTriggers, triggerErr := dynamicCache.List(knativeTriggerGVR, opts.NamespaceFilter())
+		knativeTriggers, triggerErr := dynamicCache.ListNamespaces(knativeTriggerGVR, opts.Namespaces)
 		if triggerErr != nil {
 			log.Printf("WARNING [topology] Failed to list KNative Triggers: %v", triggerErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KNative Triggers: %v", triggerErr))
@@ -1942,7 +1942,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		if !hasSrc || dynamicCache == nil {
 			continue
 		}
-		sources, srcErr := dynamicCache.List(srcGVR, opts.NamespaceFilter())
+		sources, srcErr := dynamicCache.ListNamespaces(srcGVR, opts.Namespaces)
 		if srcErr != nil {
 			log.Printf("WARNING [topology] Failed to list KNative %s: %v", srcDef.kind, srcErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KNative %s: %v", srcDef.kind, srcErr))
@@ -1982,7 +1982,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	}
 	knativeChannelIDs := make(map[string]string) // ns/name -> channelID
 	if hasKnativeChannels && dynamicCache != nil {
-		knativeChannels, chanErr := dynamicCache.List(knativeChannelGVR, opts.NamespaceFilter())
+		knativeChannels, chanErr := dynamicCache.ListNamespaces(knativeChannelGVR, opts.Namespaces)
 		if chanErr != nil {
 			log.Printf("WARNING [topology] Failed to list KNative Channels: %v", chanErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list KNative Channels: %v", chanErr))
@@ -2041,7 +2041,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		if !hasKind || dynamicCache == nil {
 			continue
 		}
-		resources, listErr := dynamicCache.List(gvr, opts.NamespaceFilter())
+		resources, listErr := dynamicCache.ListNamespaces(gvr, opts.Namespaces)
 		if listErr != nil {
 			log.Printf("WARNING [topology] Failed to list Traefik %s: %v", def.kind, listErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Traefik %s: %v", def.kind, listErr))
@@ -2114,7 +2114,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		if !hasKind || dynamicCache == nil {
 			continue
 		}
-		resources, listErr := dynamicCache.List(gvr, opts.NamespaceFilter())
+		resources, listErr := dynamicCache.ListNamespaces(gvr, opts.Namespaces)
 		if listErr != nil {
 			log.Printf("WARNING [topology] Failed to list Traefik %s: %v", def.kind, listErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Traefik %s: %v", def.kind, listErr))
@@ -2157,7 +2157,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	traefikServiceIDs := make(map[string]string)             // ns/name -> tsID
 	var traefikServiceResources []*unstructured.Unstructured // Store for edge creation
 	if hasTraefikServices && dynamicCache != nil {
-		tsvcs, tsErr := dynamicCache.List(traefikServiceGVR, opts.NamespaceFilter())
+		tsvcs, tsErr := dynamicCache.ListNamespaces(traefikServiceGVR, opts.Namespaces)
 		if tsErr != nil {
 			log.Printf("WARNING [topology] Failed to list Traefik TraefikServices: %v", tsErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Traefik TraefikServices: %v", tsErr))
@@ -2247,7 +2247,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		if !hasKind || dynamicCache == nil {
 			continue
 		}
-		resources, listErr := dynamicCache.List(gvr, opts.NamespaceFilter())
+		resources, listErr := dynamicCache.ListNamespaces(gvr, opts.Namespaces)
 		if listErr != nil {
 			log.Printf("WARNING [topology] Failed to list Traefik %s: %v", def.kind, listErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Traefik %s: %v", def.kind, listErr))
@@ -2297,7 +2297,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 			httpProxyGVR, hasHTTPProxy = resourceDiscovery.GetGVR("HTTPProxy")
 		}
 		if hasHTTPProxy && dynamicCache != nil {
-			resources, listErr := dynamicCache.List(httpProxyGVR, opts.NamespaceFilter())
+			resources, listErr := dynamicCache.ListNamespaces(httpProxyGVR, opts.Namespaces)
 			if listErr != nil {
 				log.Printf("WARNING [topology] Failed to list Contour HTTPProxy: %v", listErr)
 				warnings = append(warnings, fmt.Sprintf("Failed to list Contour HTTPProxy: %v", listErr))
@@ -2986,7 +2986,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		gatewayGVR, hasGateways = resourceDiscovery.GetGVR("Gateway")
 	}
 	if hasGateways && dynamicCache != nil {
-		gateways, gwErr := dynamicCache.List(gatewayGVR, opts.NamespaceFilter())
+		gateways, gwErr := dynamicCache.ListNamespaces(gatewayGVR, opts.Namespaces)
 		if gwErr != nil {
 			log.Printf("WARNING [topology] Failed to list Gateways: %v", gwErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Gateways: %v", gwErr))
@@ -3031,7 +3031,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 
 	// Create GatewayClass → Gateway edges (match via spec.gatewayClassName on Gateway)
 	if hasGateways && dynamicCache != nil {
-		gateways, gwEdgeErr := dynamicCache.List(gatewayGVR, opts.NamespaceFilter())
+		gateways, gwEdgeErr := dynamicCache.ListNamespaces(gatewayGVR, opts.Namespaces)
 		if gwEdgeErr != nil {
 			log.Printf("WARNING [topology] Failed to list Gateways for GatewayClass edges: %v", gwEdgeErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list Gateways for GatewayClass edges: %v", gwEdgeErr))
@@ -3071,7 +3071,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		if !hasRoutes || dynamicCache == nil {
 			continue
 		}
-		routes, routeErr := dynamicCache.List(routeGVR, opts.NamespaceFilter())
+		routes, routeErr := dynamicCache.ListNamespaces(routeGVR, opts.Namespaces)
 		if routeErr != nil {
 			log.Printf("WARNING [topology] Failed to list %s: %v", routeKind, routeErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list %s: %v", routeKind, routeErr))
@@ -3511,7 +3511,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		cnpGVR, hasCNPs = resourceDiscovery.GetGVR("CiliumNetworkPolicy")
 	}
 	if hasCNPs && dynamicCache != nil {
-		cnps, cnpErr := dynamicCache.List(cnpGVR, opts.NamespaceFilter())
+		cnps, cnpErr := dynamicCache.ListNamespaces(cnpGVR, opts.Namespaces)
 		if cnpErr != nil {
 			log.Printf("WARNING [topology] Failed to list CiliumNetworkPolicies: %v", cnpErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list CiliumNetworkPolicies: %v", cnpErr))
@@ -3652,7 +3652,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		vpaGVR, hasVPAs = resourceDiscovery.GetGVR("VerticalPodAutoscaler")
 	}
 	if hasVPAs && dynamicCache != nil {
-		vpas, vpaErr := dynamicCache.List(vpaGVR, opts.NamespaceFilter())
+		vpas, vpaErr := dynamicCache.ListNamespaces(vpaGVR, opts.Namespaces)
 		if vpaErr != nil {
 			log.Printf("WARNING [topology] Failed to list VerticalPodAutoscalers: %v", vpaErr)
 			warnings = append(warnings, fmt.Sprintf("Failed to list VerticalPodAutoscalers: %v", vpaErr))
@@ -5292,7 +5292,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 	var trafficRouteKinds []string
 	if trafficDynamicCache != nil && trafficResourceDiscovery != nil {
 		if gwGVR, ok := trafficResourceDiscovery.GetGVR("Gateway"); ok {
-			gws, err := trafficDynamicCache.List(gwGVR, opts.NamespaceFilter())
+			gws, err := trafficDynamicCache.ListNamespaces(gwGVR, opts.Namespaces)
 			if err != nil {
 				log.Printf("WARNING [topology/traffic] Failed to list Gateways: %v", err)
 				warnings = append(warnings, fmt.Sprintf("Failed to list Gateways: %v", err))
@@ -5302,7 +5302,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 		}
 		for _, routeKind := range []string{"HTTPRoute", "GRPCRoute", "TCPRoute", "TLSRoute"} {
 			if rGVR, ok := trafficResourceDiscovery.GetGVR(routeKind); ok {
-				rts, err := trafficDynamicCache.List(rGVR, opts.NamespaceFilter())
+				rts, err := trafficDynamicCache.ListNamespaces(rGVR, opts.Namespaces)
 				if err != nil {
 					log.Printf("WARNING [topology/traffic] Failed to list %s: %v", routeKind, err)
 					warnings = append(warnings, fmt.Sprintf("Failed to list %s: %v", routeKind, err))
@@ -5321,7 +5321,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 	var trafficIstioGateways []*unstructured.Unstructured
 	if trafficDynamicCache != nil && trafficResourceDiscovery != nil {
 		if vsGVR, ok := trafficResourceDiscovery.GetGVRWithGroup("VirtualService", "networking.istio.io"); ok {
-			vss, err := trafficDynamicCache.List(vsGVR, opts.NamespaceFilter())
+			vss, err := trafficDynamicCache.ListNamespaces(vsGVR, opts.Namespaces)
 			if err != nil {
 				log.Printf("WARNING [topology/traffic] Failed to list Istio VirtualServices: %v", err)
 				warnings = append(warnings, fmt.Sprintf("Failed to list Istio VirtualServices: %v", err))
@@ -5330,7 +5330,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 			}
 		}
 		if igwGVR, ok := trafficResourceDiscovery.GetGVRWithGroup("Gateway", "networking.istio.io"); ok {
-			igws, err := trafficDynamicCache.List(igwGVR, opts.NamespaceFilter())
+			igws, err := trafficDynamicCache.ListNamespaces(igwGVR, opts.Namespaces)
 			if err != nil {
 				log.Printf("WARNING [topology/traffic] Failed to list Istio Gateways: %v", err)
 				warnings = append(warnings, fmt.Sprintf("Failed to list Istio Gateways: %v", err))
@@ -5344,7 +5344,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 	var trafficKnativeServices []*unstructured.Unstructured
 	if trafficDynamicCache != nil && trafficResourceDiscovery != nil {
 		if ksvcGVR, ok := trafficResourceDiscovery.GetGVRWithGroup("Service", "serving.knative.dev"); ok {
-			ksvcs, err := trafficDynamicCache.List(ksvcGVR, opts.NamespaceFilter())
+			ksvcs, err := trafficDynamicCache.ListNamespaces(ksvcGVR, opts.Namespaces)
 			if err != nil {
 				log.Printf("WARNING [topology/traffic] Failed to list KNative Services: %v", err)
 				warnings = append(warnings, fmt.Sprintf("Failed to list KNative Services: %v", err))
@@ -5479,7 +5479,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 	if trafficDynamicCache != nil && trafficResourceDiscovery != nil {
 		for _, routeKind := range []string{"IngressRoute", "IngressRouteTCP", "IngressRouteUDP"} {
 			if gvr, ok := trafficResourceDiscovery.GetGVR(routeKind); ok {
-				rts, err := trafficDynamicCache.List(gvr, opts.NamespaceFilter())
+				rts, err := trafficDynamicCache.ListNamespaces(gvr, opts.Namespaces)
 				if err != nil {
 					log.Printf("WARNING [topology/traffic] Failed to list Traefik %s: %v", routeKind, err)
 					warnings = append(warnings, fmt.Sprintf("Failed to list Traefik %s: %v", routeKind, err))
@@ -5492,7 +5492,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 			}
 		}
 		if tsGVR, ok := trafficResourceDiscovery.GetGVR("TraefikService"); ok {
-			tss, err := trafficDynamicCache.List(tsGVR, opts.NamespaceFilter())
+			tss, err := trafficDynamicCache.ListNamespaces(tsGVR, opts.Namespaces)
 			if err != nil {
 				log.Printf("WARNING [topology/traffic] Failed to list TraefikServices: %v", err)
 				warnings = append(warnings, fmt.Sprintf("Failed to list TraefikServices: %v", err))
@@ -5501,7 +5501,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 			}
 		}
 		if mwGVR, ok := trafficResourceDiscovery.GetGVR("Middleware"); ok {
-			mws, err := trafficDynamicCache.List(mwGVR, opts.NamespaceFilter())
+			mws, err := trafficDynamicCache.ListNamespaces(mwGVR, opts.Namespaces)
 			if err != nil {
 				log.Printf("WARNING [topology/traffic] Failed to list Traefik Middlewares: %v", err)
 				warnings = append(warnings, fmt.Sprintf("Failed to list Traefik Middlewares: %v", err))
@@ -5510,7 +5510,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 			}
 		}
 		if mtGVR, ok := trafficResourceDiscovery.GetGVR("MiddlewareTCP"); ok {
-			mts, err := trafficDynamicCache.List(mtGVR, opts.NamespaceFilter())
+			mts, err := trafficDynamicCache.ListNamespaces(mtGVR, opts.Namespaces)
 			if err != nil {
 				log.Printf("WARNING [topology/traffic] Failed to list Traefik MiddlewareTCPs: %v", err)
 				warnings = append(warnings, fmt.Sprintf("Failed to list Traefik MiddlewareTCPs: %v", err))
@@ -5614,7 +5614,7 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 	var trafficHTTPProxies []*unstructured.Unstructured
 	if trafficDynamicCache != nil && trafficResourceDiscovery != nil {
 		if gvr, ok := trafficResourceDiscovery.GetGVR("HTTPProxy"); ok {
-			hps, err := trafficDynamicCache.List(gvr, opts.NamespaceFilter())
+			hps, err := trafficDynamicCache.ListNamespaces(gvr, opts.Namespaces)
 			if err != nil {
 				log.Printf("WARNING [topology/traffic] Failed to list Contour HTTPProxy: %v", err)
 				warnings = append(warnings, fmt.Sprintf("Failed to list Contour HTTPProxy: %v", err))
@@ -7737,7 +7737,7 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 		}
 		processedKinds[kindLower] = true
 
-		resources, err := dynamicCache.List(gvr, opts.NamespaceFilter())
+		resources, err := dynamicCache.ListNamespaces(gvr, opts.Namespaces)
 		if err != nil {
 			log.Printf("WARNING [topology] Failed to list %s resources for generic CRD support: %v", kind, err)
 			continue

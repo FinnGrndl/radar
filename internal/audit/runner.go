@@ -93,7 +93,7 @@ func listCrossplaneDynamic(namespaces []string) (mrs, xrs []*unstructured.Unstru
 		if gvr.Group == "pkg.crossplane.io" || gvr.Group == "apiextensions.crossplane.io" {
 			continue
 		}
-		items, err := cache.List(gvr, "")
+		items, err := cache.ListWatched(gvr)
 		if err != nil {
 			if !apierrors.IsForbidden(err) && !apierrors.IsUnauthorized(err) {
 				log.Printf("[audit] Crossplane scan: skipping %s/%s: %v", gvr.GroupResource(), gvr.Version, err)

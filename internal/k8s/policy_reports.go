@@ -340,7 +340,7 @@ func listPolicyReportsAll(gvrs []schema.GroupVersionResource) []*unstructured.Un
 	}
 	var all []*unstructured.Unstructured
 	for _, gvr := range gvrs {
-		items, err := cache.List(gvr, "")
+		items, err := cache.ListWatched(gvr)
 		if err != nil {
 			log.Printf("[policy-reports] list %s: %v", gvr, err)
 			continue

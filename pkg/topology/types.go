@@ -270,16 +270,6 @@ func (opts BuildOptions) MatchesNamespaceFilter(ns string) bool {
 	return MatchesNamespace(opts.Namespaces, ns)
 }
 
-// NamespaceFilter returns the namespace to use for API queries.
-// If exactly one namespace is filtered, return it (for efficient API filtering).
-// Otherwise return empty string (query all, filter client-side).
-func (opts BuildOptions) NamespaceFilter() string {
-	if len(opts.Namespaces) == 1 {
-		return opts.Namespaces[0]
-	}
-	return ""
-}
-
 // DefaultBuildOptions returns sensible defaults
 func DefaultBuildOptions() BuildOptions {
 	return BuildOptions{
@@ -403,6 +393,11 @@ type ResourceProvider interface {
 // It combines DynamicResourceCache + ResourceDiscovery methods.
 type DynamicProvider interface {
 	List(gvr schema.GroupVersionResource, namespace string) ([]*unstructured.Unstructured, error)
+	// ListNamespaces unions a GVR across an explicit namespace set (or reads
+	// cluster-wide for an empty set / cluster-scoped resource). Topology uses
+	// this instead of List(gvr, "") so namespace-restricted users with several
+	// allowed namespaces still see CRD nodes from all of them.
+	ListNamespaces(gvr schema.GroupVersionResource, namespaces []string) ([]*unstructured.Unstructured, error)
 	Get(gvr schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error)
 	GetWatchedResources() []schema.GroupVersionResource
 	GetDiscoveryStatus() k8score.CRDDiscoveryStatus
