@@ -33,6 +33,7 @@ export const CORE_RESOURCES: APIResource[] = [
   { group: 'batch', version: 'v1', kind: 'CronJob', name: 'cronjobs', namespaced: true, isCrd: false, verbs: ['list', 'get', 'watch'] },
   { group: 'networking.k8s.io', version: 'v1', kind: 'Ingress', name: 'ingresses', namespaced: true, isCrd: false, verbs: ['list', 'get', 'watch'] },
   { group: 'networking.k8s.io', version: 'v1', kind: 'NetworkPolicy', name: 'networkpolicies', namespaced: true, isCrd: false, verbs: ['list', 'get', 'watch'] },
+  { group: 'discovery.k8s.io', version: 'v1', kind: 'EndpointSlice', name: 'endpointslices', namespaced: true, isCrd: false, verbs: ['list', 'get', 'watch'] },
   { group: 'autoscaling', version: 'v2', kind: 'HorizontalPodAutoscaler', name: 'horizontalpodautoscalers', namespaced: true, isCrd: false, verbs: ['list', 'get', 'watch'] },
   { group: '', version: 'v1', kind: 'Event', name: 'events', namespaced: true, isCrd: false, verbs: ['list', 'get', 'watch'] },
   { group: 'rbac.authorization.k8s.io', version: 'v1', kind: 'Role', name: 'roles', namespaced: true, isCrd: false, verbs: ['list', 'get', 'watch'] },

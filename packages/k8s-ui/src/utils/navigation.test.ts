@@ -32,6 +32,11 @@ describe('kindToPlural', () => {
     expect(pluralToKind('endpoints')).toBe('Endpoints')
   })
 
+  test('handles EndpointSlice before discovery loads', () => {
+    expect(kindToPlural('EndpointSlice')).toBe('endpointslices')
+    expect(pluralToKind('endpointslices')).toBe('EndpointSlice')
+  })
+
   test('handles kinds ending in ss (Class-suffix)', () => {
     expect(kindToPlural('StorageClass')).toBe('storageclasses')
     expect(kindToPlural('IngressClass')).toBe('ingressclasses')

@@ -922,7 +922,7 @@ function DrawerMetricsContent({ kind, namespace, name, resource }: {
   resource: any
 }) {
   const [chartRange, setChartRange] = useState<import('../../api/client').PrometheusTimeRange>('1h')
-  const showRestartLane = kind !== 'Node'
+  const showRestartLane = isPrometheusSupported(kind) && kind !== 'Node'
 
   return (
     <div className="flex flex-col h-full">

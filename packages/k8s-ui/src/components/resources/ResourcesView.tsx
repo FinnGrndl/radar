@@ -310,6 +310,16 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'externalIP', label: 'External', width: 'w-40', hideOnMobile: true },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
+  endpointslices: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-48' },
+    { key: 'service', label: 'Service', width: 'w-48' },
+    { key: 'addressType', label: 'Address Type', width: 'w-28' },
+    { key: 'endpoints', label: 'Endpoints', width: 'w-32' },
+    { key: 'addresses', label: 'Addresses', width: 'w-24' },
+    { key: 'ports', label: 'Ports', width: 'w-40', hideOnMobile: true },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
   ingresses: [
     { key: 'name', label: 'Name', width: 'min-w-40' },
     { key: 'namespace', label: 'Namespace', width: 'w-36 shrink-0' },
@@ -4509,6 +4519,8 @@ function CellContent({ resource, kind, column, group, majorityNodeMinorVersion, 
       return <ReplicaSetCell resource={resource} column={column} />
     case 'services':
       return <ServiceCell resource={resource} column={column} />
+    case 'endpointslices':
+      return <EndpointSliceCell resource={resource} column={column} />
     case 'ingresses':
       return <IngressCell resource={resource} column={column} />
     case 'configmaps':
@@ -5327,6 +5339,56 @@ function ServiceCell({ resource, column }: { resource: any; column: string }) {
     case 'ports': {
       const ports = getServicePorts(resource)
       return <span className="text-sm text-theme-text-secondary">{ports}</span>
+    }
+    default:
+      return <span className="text-sm text-theme-text-tertiary">-</span>
+  }
+}
+
+function getEndpointSliceReadyCount(resource: any): number {
+  return (resource.endpoints || []).filter((endpoint: any) => endpoint?.conditions?.ready !== false).length
+}
+
+function getEndpointSliceAddressCount(resource: any): number {
+  return (resource.endpoints || []).reduce((total: number, endpoint: any) => total + (endpoint.addresses?.length || 0), 0)
+}
+
+function getEndpointSlicePorts(resource: any): string {
+  const ports = resource.ports || []
+  if (ports.length === 0) return '-'
+  return ports.map((port: any) => {
+    const name = port.name || 'unnamed'
+    const protocol = port.protocol || 'TCP'
+    return `${name}:${port.port ?? '-'}${protocol !== 'TCP' ? `/${protocol}` : ''}`
+  }).join(', ')
+}
+
+function EndpointSliceCell({ resource, column }: { resource: any; column: string }) {
+  switch (column) {
+    case 'service': {
+      const service = resource.metadata?.labels?.['kubernetes.io/service-name']
+      return <span className="text-sm text-theme-text-secondary truncate">{service || '-'}</span>
+    }
+    case 'addressType':
+      return <span className="text-sm text-theme-text-secondary">{resource.addressType || '-'}</span>
+    case 'endpoints': {
+      const total = resource.endpoints?.length || 0
+      const ready = getEndpointSliceReadyCount(resource)
+      const color = total === 0 ? SEVERITY_BADGE.neutral :
+        ready === total ? SEVERITY_BADGE.success :
+        ready > 0 ? SEVERITY_BADGE.warning :
+        SEVERITY_BADGE.error
+      return <span className={clsx('badge', color)}>{ready}/{total}</span>
+    }
+    case 'addresses':
+      return <span className="text-sm text-theme-text-secondary">{getEndpointSliceAddressCount(resource)}</span>
+    case 'ports': {
+      const ports = getEndpointSlicePorts(resource)
+      return (
+        <Tooltip content={ports}>
+          <span className="text-sm text-theme-text-secondary truncate">{ports}</span>
+        </Tooltip>
+      )
     }
     default:
       return <span className="text-sm text-theme-text-tertiary">-</span>

@@ -34,6 +34,38 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 	counts := make(map[string]int)
 	var forbidden []string
 
+	countEndpointSlices := func() {
+		dynamicCache := k8s.GetDynamicResourceCache()
+		if dynamicCache == nil {
+			return
+		}
+		gvr, ok := k8s.BuiltinGVR("endpointslices", "discovery.k8s.io")
+		if !ok {
+			return
+		}
+		total := 0
+		if len(namespaces) == 0 {
+			items, err := dynamicCache.ListDirect(r.Context(), gvr, "")
+			if err != nil {
+				log.Printf("[resource-counts] Failed to count EndpointSlice: %v", err)
+				return
+			}
+			total = len(items)
+		} else {
+			for _, ns := range namespaces {
+				items, err := dynamicCache.ListDirect(r.Context(), gvr, ns)
+				if err != nil {
+					log.Printf("[resource-counts] Failed to count EndpointSlice in namespace %s: %v", ns, err)
+					continue
+				}
+				total += len(items)
+			}
+		}
+		if total > 0 {
+			counts["discovery.k8s.io/EndpointSlice"] = total
+		}
+	}
+
 	for _, kl := range k8score.AllKindListers() {
 		l := kl.Lister()(cache.ResourceCache)
 		if l == nil {
@@ -127,6 +159,7 @@ func (s *Server) handleResourceCounts(w http.ResponseWriter, r *http.Request) {
 			wg.Wait()
 		}
 	}
+	countEndpointSlices()
 
 	s.writeJSON(w, ResourceCountsResponse{
 		Counts:    counts,

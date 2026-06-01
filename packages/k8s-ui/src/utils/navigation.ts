@@ -12,6 +12,7 @@ const BUILTIN_PLURAL_TO_KIND: Record<string, string> = {
   pods: 'Pod',
   services: 'Service',
   endpoints: 'Endpoints', // already-plural resource name; englishPlural would yield "endpointses"
+  endpointslices: 'EndpointSlice',
   deployments: 'Deployment',
   daemonsets: 'DaemonSet',
   statefulsets: 'StatefulSet',

@@ -39,6 +39,10 @@ func TestTypedKindOwnsGroup(t *testing.T) {
 		{"storageclasses", "storage.k8s.io", true},
 		{"clusterroles", "rbac.authorization.k8s.io", true},
 
+		// Built-in, but intentionally served through the dynamic cache
+		// rather than a baseline typed informer.
+		{"endpointslices", "discovery.k8s.io", false},
+
 		// Core kinds: own group is "" — typed, with or without an explicit "".
 		{"pods", "", true},
 		{"services", "", true},
@@ -83,6 +87,7 @@ func TestBuiltinGVR(t *testing.T) {
 		{"pods", "", schema.GroupVersionResource{Version: "v1", Resource: "pods"}, true},
 		{"sa", "", schema.GroupVersionResource{Version: "v1", Resource: "serviceaccounts"}, true},
 		{"netpols", "networking.k8s.io", schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}, true},
+		{"endpointslice", "discovery.k8s.io", schema.GroupVersionResource{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}, true},
 		{"services", "serving.knative.dev", schema.GroupVersionResource{}, false}, // CRD collision
 		{"widgets", "example.com", schema.GroupVersionResource{}, false},          // genuine CRD
 	}

@@ -68,6 +68,7 @@ var builtinGVRs = func() map[string]schema.GroupVersionResource {
 		{[]string{"ingress", "ingresses"}, "networking.k8s.io", "v1", "ingresses"},
 		{[]string{"networkpolicy", "networkpolicies", "netpol", "netpols"}, "networking.k8s.io", "v1", "networkpolicies"},
 		{[]string{"ingressclass", "ingressclasses"}, "networking.k8s.io", "v1", "ingressclasses"},
+		{[]string{"endpointslice", "endpointslices"}, "discovery.k8s.io", "v1", "endpointslices"},
 		{[]string{"poddisruptionbudget", "poddisruptionbudgets", "pdb", "pdbs"}, "policy", "v1", "poddisruptionbudgets"},
 		{[]string{"storageclass", "storageclasses", "sc"}, "storage.k8s.io", "v1", "storageclasses"},
 		{[]string{"role", "roles"}, "rbac.authorization.k8s.io", "v1", "roles"},
@@ -94,6 +95,9 @@ var builtinGVRs = func() map[string]schema.GroupVersionResource {
 // don't fall through to the dynamic cache (which has no informer for them).
 func TypedKindOwnsGroup(kind, group string) bool {
 	gvr, ok := builtinGVRs[strings.ToLower(kind)]
+	if ok && gvr.Group == "discovery.k8s.io" && gvr.Resource == "endpointslices" {
+		return false
+	}
 	return ok && gvr.Group == group
 }
 

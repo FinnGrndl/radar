@@ -657,7 +657,7 @@ export function formatKindName(kind: string): string {
   const k = kind.toLowerCase()
   const names: Record<string, string> = {
     pods: 'Pod', deployments: 'Deployment', daemonsets: 'DaemonSet', statefulsets: 'StatefulSet',
-    replicasets: 'ReplicaSet', services: 'Service', ingresses: 'Ingress',
+    replicasets: 'ReplicaSet', services: 'Service', endpointslices: 'EndpointSlice', ingresses: 'Ingress',
     gateways: 'Gateway', httproutes: 'HTTPRoute', grpcroutes: 'GRPCRoute',
     tcproutes: 'TCPRoute', tlsroutes: 'TLSRoute', configmaps: 'ConfigMap',
     secrets: 'Secret', jobs: 'Job', cronjobs: 'CronJob', hpas: 'HPA',

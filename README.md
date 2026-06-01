@@ -359,7 +359,7 @@ Radar auto-discovers any CRD in your cluster. Popular tools get [dedicated integ
 | Category | Resources |
 |----------|-----------|
 | **Workloads** | Deployments, DaemonSets, StatefulSets, ReplicaSets, Pods, Jobs, CronJobs |
-| **Networking** | Services, Ingresses, NetworkPolicies, Endpoints, PodDisruptionBudgets |
+| **Networking** | Services, Ingresses, NetworkPolicies, Endpoints, EndpointSlices, PodDisruptionBudgets |
 | **Configuration** | ConfigMaps, Secrets (names only, values hidden), LimitRanges, ResourceQuotas |
 | **Storage** | PersistentVolumeClaims, PersistentVolumes, StorageClasses |
 | **Autoscaling** | HorizontalPodAutoscalers, VerticalPodAutoscalers |

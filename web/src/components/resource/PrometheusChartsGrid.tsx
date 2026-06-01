@@ -48,14 +48,12 @@ export function PrometheusChartsGrid({
   name,
   resource,
 }: PrometheusChartsGridProps) {
-  // Node-kind workloads don't have container restart semantics — KSM would
-  // return empty series anyway, but suppressing the lane spares the query.
-  const showRestartLane = kind !== 'Node'
   useAutoPromConnect()
   const { data: status, isLoading: statusLoading } = usePrometheusStatus()
   const connectMutation = usePrometheusConnect()
   const isConnected = status?.connected === true
   const isSupported = SUPPORTED_KINDS.has(kind)
+  const showRestartLane = isSupported && kind !== 'Node'
 
   const [timeRange, setTimeRange] = useState<PrometheusTimeRange>('1h')
   const [diskExpanded, setDiskExpanded] = useState(false)

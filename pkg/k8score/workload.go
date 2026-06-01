@@ -96,9 +96,38 @@ func (m *WorkloadManager) UpdateResource(ctx context.Context, opts UpdateResourc
 		return nil, fmt.Errorf("invalid YAML: %w", err)
 	}
 
-	gvr, ok := m.discovery.GetGVR(opts.Kind)
+	kindForLookup := opts.Kind
+	if obj.GetKind() != "" {
+		kindForLookup = obj.GetKind()
+	}
+	apiGroup := ""
+	if apiVersion := obj.GetAPIVersion(); strings.Contains(apiVersion, "/") {
+		apiGroup = strings.SplitN(apiVersion, "/", 2)[0]
+	}
+	var gvr schema.GroupVersionResource
+	var ok bool
+	if apiGroup != "" {
+		gvr, ok = m.discovery.GetGVRWithGroup(kindForLookup, apiGroup)
+		if !ok {
+			if fallbackGVR, fallbackOK := m.discovery.GetGVR(kindForLookup); fallbackOK && fallbackGVR.Group == apiGroup {
+				gvr, ok = fallbackGVR, true
+			}
+		}
+	} else {
+		gvr, ok = m.discovery.GetGVR(kindForLookup)
+	}
 	if !ok {
+		return nil, fmt.Errorf("unknown resource kind: %s", kindForLookup)
+	}
+	requestedGVR, requestedOK := m.discovery.GetGVRWithGroup(opts.Kind, apiGroup)
+	if !requestedOK {
+		requestedGVR, requestedOK = m.discovery.GetGVR(opts.Kind)
+	}
+	if !requestedOK {
 		return nil, fmt.Errorf("unknown resource kind: %s", opts.Kind)
+	}
+	if requestedGVR.Group != gvr.Group || requestedGVR.Resource != gvr.Resource {
+		return nil, fmt.Errorf("resource kind mismatch: expected %s, got %s", opts.Kind, kindForLookup)
 	}
 
 	if obj.GetName() != opts.Name {

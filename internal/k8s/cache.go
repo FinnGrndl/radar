@@ -747,6 +747,10 @@ func (c *ResourceCache) ListDynamicWithGroup(ctx context.Context, kind string, n
 		return nil, fmt.Errorf("dynamic resource cache not initialized")
 	}
 
+	if gvr.Group == "discovery.k8s.io" && gvr.Resource == "endpointslices" {
+		return dynamicCache.ListDirect(ctx, gvr, namespace)
+	}
+
 	return dynamicCache.List(gvr, namespace)
 }
 
@@ -828,7 +832,9 @@ func (c *ResourceCache) getDynamicWithGroup(ctx context.Context, kind string, na
 	// cluster-wide just to power a per-page-load drift diff.
 	var u *unstructured.Unstructured
 	var err error
-	if gvr.Group == "apiextensions.k8s.io" && gvr.Resource == "customresourcedefinitions" {
+	if gvr.Group == "discovery.k8s.io" && gvr.Resource == "endpointslices" {
+		u, err = dynamicCache.GetDirect(ctx, gvr, namespace, name)
+	} else if gvr.Group == "apiextensions.k8s.io" && gvr.Resource == "customresourcedefinitions" {
 		u, err = dynamicCache.GetDirect(ctx, gvr, namespace, name)
 	} else if preserveLastApplied {
 		u, err = dynamicCache.GetDirectPreserveLastApplied(ctx, gvr, namespace, name)

@@ -110,6 +110,7 @@ import {
   RoleBindingRenderer,
   WebhookConfigRenderer,
   EventRenderer,
+  EndpointSliceRenderer,
   GenericRenderer,
   GitRepositoryRenderer,
   OCIRepositoryRenderer,
@@ -242,6 +243,7 @@ export interface RendererOverrides {
   }>
   ServiceRenderer?: React.ComponentType<{
     data: any; onCopy: CopyHandler; copied: string | null
+    onNavigate?: (ref: ResourceRef) => void
   }>
   WorkloadRenderer?: React.ComponentType<{
     kind: string; data: any
@@ -299,7 +301,7 @@ export interface RendererOverrides {
 // Known resource types with specific renderers (module-level to avoid re-allocation)
 const KNOWN_KINDS = new Set([
   'pods', 'deployments', 'statefulsets', 'daemonsets', 'replicasets',
-  'services', 'ingresses', 'configmaps', 'secrets', 'jobs', 'cronjobs',
+  'services', 'endpointslices', 'ingresses', 'configmaps', 'secrets', 'jobs', 'cronjobs',
   'hpas', 'horizontalpodautoscalers', 'nodes', 'persistentvolumeclaims',
   'rollouts', 'certificates', 'workflows', 'persistentvolumes',
   'storageclasses', 'certificaterequests', 'clusterissuers', 'issuers',
@@ -494,7 +496,8 @@ export function ResourceRendererDispatch({
           />
         )}
         {kind === 'replicasets' && <ReplicaSetRenderer data={data} />}
-        {kind === 'services' && !data?.apiVersion?.includes('serving.knative.dev') && <ServiceComp data={data} onCopy={onCopy} copied={copied} />}
+        {kind === 'services' && !data?.apiVersion?.includes('serving.knative.dev') && <ServiceComp data={data} onCopy={onCopy} copied={copied} onNavigate={onNavigate} />}
+        {kind === 'endpointslices' && <EndpointSliceRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'ingresses' && !data?.apiVersion?.includes('networking.internal.knative.dev') && <IngressRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'configmaps' && <ConfigMapRenderer data={data} />}
         {kind === 'secrets' && <SecretRenderer data={data} certificateInfo={certificateInfo} resourceData={data} onSaveSecretValue={onSaveSecretValue} isSaving={isSavingSecret} />}
@@ -696,6 +699,16 @@ export function getResourceStatus(kind: string, data: any): { text: string; colo
       return { text: status.text, color: status.color }
     }
     return getServiceStatus(data)
+  }
+  if (k === 'endpointslices') {
+    const endpoints = data.endpoints || []
+    const ready = endpoints.filter((endpoint: any) => endpoint?.conditions?.ready !== false).length
+    const text = endpoints.length === 0 ? 'No endpoints' : `${ready}/${endpoints.length} ready`
+    const color = endpoints.length === 0 ? SEVERITY_BADGE.neutral :
+      ready === endpoints.length ? SEVERITY_BADGE.success :
+      ready > 0 ? SEVERITY_BADGE.warning :
+      SEVERITY_BADGE.error
+    return { text, color }
   }
   if (k === 'jobs') return getJobStatus(data)
   if (k === 'cronjobs') return getCronJobStatus(data)
