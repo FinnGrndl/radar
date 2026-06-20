@@ -56,7 +56,8 @@ import { SettingsDialog } from './components/settings/SettingsDialog'
 import { MyPermissionsDialog } from './components/settings/MyPermissionsDialog'
 import type { TopologyNode, GroupingMode, MainView, SelectedResource, SelectedHelmRelease, NodeKind, TopologyMode, Topology, K8sEvent } from './types'
 import { kindToPlural, openExternal, apiVersionToGroup, buildWorkloadPath, searchHitToSelectedResource } from './utils/navigation'
-import { Omnibar, type OmnibarHandle } from './components/ui/Omnibar'
+import { type OmnibarHandle } from './components/ui/Omnibar'
+import { RadarOmnibar } from './components/ui/RadarOmnibar'
 import type { ContextSwitcherHandle } from './components/ContextSwitcher'
 
 // All possible node kinds (core + GitOps)
@@ -541,7 +542,9 @@ function AppInner() {
       description: 'Show keyboard shortcuts',
       category: 'General' as const,
       scope: 'global' as const,
-      handler: () => setShowHelp(prev => !prev),
+      // Chromeless embeds (Radar Hub) own their own help surface — don't open a
+      // competing Radar overlay.
+      handler: () => { if (!chromeless) setShowHelp(prev => !prev) },
     },
     {
       id: 'command-palette',
@@ -550,8 +553,10 @@ function AppInner() {
       category: 'General' as const,
       scope: 'global' as const,
       allowInInputs: true,
-      // Standalone focuses the top-center omnibar; embedded opens the modal.
-      handler: () => { if (showNavRail) omnibarRef.current?.focus(); else setShowCommandPalette(true) },
+      // Standalone focuses the top-center omnibar; embedded opens the modal. In
+      // a chromeless embed the HOST owns ⌘K (its own omnibar), so do nothing —
+      // otherwise both the host omnibar and Radar's palette fire on one ⌘K.
+      handler: () => { if (showNavRail) omnibarRef.current?.focus(); else if (!chromeless) setShowCommandPalette(true) },
     },
     {
       id: 'diagnostics',
@@ -1352,7 +1357,7 @@ function AppInner() {
             Fills the space the pill bar left; embedded keeps the pills + modal. */}
         {showNavRail && (
           <div className="hidden sm:flex flex-1 justify-center min-w-0 px-3">
-            <Omnibar
+            <RadarOmnibar
               ref={omnibarRef}
               onNavigateView={(view) => setMainView(view)}
               onNavigateKind={(kind, group) => {
@@ -1851,6 +1856,9 @@ function AppInner() {
         <ResourceDetailDrawer
           resource={drawerResource}
           initialTab={drawerInitialTab}
+          // No Radar header in chromeless embeds (Radar Hub) — anchor the drawer
+          // to the top of the content area instead of leaving a 49px gap.
+          headerHeight={chromeless ? 0 : undefined}
           isOpen={resourceDrawer.isOpen}
           expanded={drawerExpanded}
           onClose={() => { setSelectedResource(null); setDrawerInitialTab('detail'); setDrawerExpanded(false) }}
