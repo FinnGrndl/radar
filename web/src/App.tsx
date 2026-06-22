@@ -1960,8 +1960,9 @@ function AppInner() {
       />
       <MyPermissionsDialog open={showMyPermissions} onClose={() => setShowMyPermissions(false)} />
 
-      {/* Debug overlay - only in dev mode */}
-      {import.meta.env.DEV && <DebugOverlay />}
+      {/* Debug overlay — dev mode, standalone only. Embedded hosts (Radar Hub)
+          own their own dev tooling; ours would collide with theirs bottom-right. */}
+      {import.meta.env.DEV && showNavRail && <DebugOverlay />}
       </div>
     </div>
     </PortForwardProvider>

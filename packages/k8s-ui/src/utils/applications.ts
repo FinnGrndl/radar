@@ -53,6 +53,63 @@ export interface AppIdentity {
   evidence: string
   /** True when the key is backed by declared upstream identity and can group across clusters. */
   portable?: boolean
+  /** Machine-readable provenance tier (radar applications_identity.go):
+   *  explicit | argo-path | argo-appset | flux-source (declared origins, portable)
+   *  · label | name-stem | namespace (NAMEs, per-cluster). */
+  source?: string
+  /** Declared source-path stem (argo-path / flux-source only). The display `key`
+   *  is the name stem; this disambiguates same-name/different-path apps in the
+   *  portable cross-cluster fold. */
+  pathKey?: string
+}
+
+/** The user-set annotation that forces cross-cluster grouping — the canonical
+ *  answer to "how do I make this fold?" for non-GitOps apps. */
+export const APP_IDENTITY_ANNOTATION = 'app.skyhook.io/app'
+
+/** Whether a Source is a declared cross-cluster origin (mirrors the hub's
+ *  isDeclaredPortableSource). NAMEs collide across clusters and stay per-cluster. */
+export function isDeclaredAppSource(source?: string): boolean {
+  return source === 'explicit' || source === 'argo-path' || source === 'argo-appset' || source === 'flux-source'
+}
+
+/** A short label for how an app's identity was determined, by Source — the
+ *  plain-language "grouped by …" phrase shown in the identity tooltip. */
+export function appSourceLabel(source?: string): string {
+  switch (source) {
+    case 'explicit':
+      return `the ${APP_IDENTITY_ANNOTATION} annotation`
+    case 'argo-path':
+      return 'its Argo CD source path'
+    case 'argo-appset':
+      return 'its ApplicationSet (env fan-out)'
+    case 'flux-source':
+      return 'its Flux source'
+    case 'addon':
+      return 'a shared add-on name + chart/image'
+    case 'label':
+      return 'the app.kubernetes.io/name label'
+    case 'name-stem':
+      return 'a shared name + image'
+    case 'namespace':
+      return 'a shared namespace + image'
+    default:
+      return 'its workload grouping'
+  }
+}
+
+/** The explainer for "why isn't this grouped across clusters, and how do I fix
+ *  it?" — drives the per-cluster row hint. `folds` is true when the identity is a
+ *  declared origin (folds cross-cluster); otherwise `fix` says what to add. */
+export function appGroupingExplainer(identity?: AppIdentity): { folds: boolean; how: string; fix?: string } {
+  const folds = isDeclaredAppSource(identity?.source)
+  return {
+    folds,
+    how: `Grouped by ${appSourceLabel(identity?.source)}.`,
+    fix: folds
+      ? undefined
+      : `This app only has a per-cluster name, which can't prove two clusters run the same app. To fold it across clusters, set ${APP_IDENTITY_ANNOTATION} on its workloads in each cluster (same value), or deploy it via Argo CD / Flux with the environment in the source path.`,
+  }
 }
 
 export interface AppRow {
@@ -495,7 +552,10 @@ export function foldAppGroups<T extends AppGroupFoldEntry>(
     if (!id) return null
     const scope = options.localScope?.(e)
     if (!scope) return id.key
-    return id.portable ? `portable:${id.key}` : `local:${scope}:${id.key}`
+    // A declared-PATH identity displays its name stem as the key but carries the
+    // path stem in pathKey; two different apps can share a name while declaring
+    // different paths, so disambiguate the portable cross-cluster fold by pathKey.
+    return id.portable ? `portable:${id.key}${id.pathKey ? `:${id.pathKey}` : ''}` : `local:${scope}:${id.key}`
   }
   const byGroup = new Map<string, T[]>()
   for (const e of entries) {
