@@ -83,6 +83,7 @@ const KIND_BY_NAME = new Map(GITOPS_KINDS.map((k) => [k.name, k]))
 interface ResourceCountsResponse {
   counts: Record<string, number>
   forbidden?: string[]
+  unavailable?: string[]
 }
 
 interface GitOpsViewProps {
@@ -136,9 +137,15 @@ function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string
     initNavigationMap([...(apiResources ?? []), ...GITOPS_KINDS])
   }, [apiResources])
 
-  // Counts come from radar's /api/resource-counts, kind-filtered to the
-  // GitOps set. The extracted GitOpsTableView reads them for the
-  // Scope-section mode tabs + the empty-state check.
+  const hasGitOpsRowResource = useMemo(() => (
+    hasAPIResource(apiResources, 'applications', 'argoproj.io') ||
+    hasAPIResource(apiResources, 'kustomizations', 'kustomize.toolkit.fluxcd.io') ||
+    hasAPIResource(apiResources, 'helmreleases', 'helm.toolkit.fluxcd.io')
+  ), [apiResources])
+
+  // Counts come from radar's /api/resource-counts. The extracted
+  // GitOpsTableView reads only the GitOps keys for mode tabs + empty-state
+  // checks.
   const countsQuery = useQuery({
     queryKey: ['gitops-resource-counts', namespacesParam],
     queryFn: async () => {
@@ -217,6 +224,7 @@ function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string
   const [coldRetrying, setColdRetrying] = useState(false)
   useEffect(() => { coldRetriesRef.current = 0; setColdRetrying(false) }, [apiResources, namespacesParam])
   useEffect(() => {
+    if (!hasGitOpsRowResource || rowsQuery.error) { setColdRetrying(false); return }
     if (apiResourcesLoading || rowsQuery.isFetching) return
     if ((rowsQuery.data?.length ?? 0) > 0) { setColdRetrying(false); return }
     if (coldRetriesRef.current >= 4) { setColdRetrying(false); return }
@@ -224,7 +232,7 @@ function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string
     const t = window.setTimeout(() => { coldRetriesRef.current += 1; refetchTable() }, 2000)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rowsQuery.data, rowsQuery.isFetching, apiResourcesLoading])
+  }, [rowsQuery.data, rowsQuery.isFetching, rowsQuery.error, apiResourcesLoading, hasGitOpsRowResource])
 
   const handleRowAction = (row: GitOpsRow, action: GitOpsRowAction) => {
     const { kindName: kind, namespace, name, id } = row
@@ -271,6 +279,7 @@ function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string
         loading={apiResourcesLoading || countsQuery.isLoading || rowsQuery.isLoading || coldRetrying}
         error={(rowsQuery.error as Error | null) ?? null}
         counts={countsQuery.data?.counts ?? {}}
+        countsUnavailable={countsQuery.data?.unavailable}
         onRefresh={() => rowsQuery.refetch()}
         onRowClick={(row) => {
           const ns = row.namespace || '_'
@@ -958,5 +967,3 @@ function TopologyCounts({ tree }: { tree: GitOpsResourceTree }) {
     </div>
   )
 }
-
-
