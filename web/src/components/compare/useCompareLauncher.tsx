@@ -31,15 +31,18 @@ export function useCompareLauncher({ kind, namespace, name, group }: UseCompareL
   const [open, setOpen] = useState(false)
   const kindLower = kind.toLowerCase()
   const { candidates, isPending, error } = useCompareCandidates(kindLower, group, open)
-  const { crossClusterCompareHref } = useNavCustomization()
+  const { crossClusterCompareHref, onHostNavigate } = useNavCustomization()
 
   const onCompareTo = useCallback(() => setOpen(true), [])
 
   const onCompareAcrossClusters = useCallback(() => {
     if (!crossClusterCompareHref) return
     const href = crossClusterCompareHref({ kind: kindLower, namespace, name, group })
-    window.location.assign(href)
-  }, [crossClusterCompareHref, kindLower, namespace, name, group])
+    // Smooth same-document hand-off when the host supports it (Radar Cloud's
+    // cross-tree swap), else a hard nav — same contract as App.tsx's goHost.
+    if (onHostNavigate) onHostNavigate(href)
+    else window.location.assign(href)
+  }, [crossClusterCompareHref, onHostNavigate, kindLower, namespace, name, group])
 
   const handlePick = useCallback(
     (picked: CompareResourceRef) => {

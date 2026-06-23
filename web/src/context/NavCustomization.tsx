@@ -54,11 +54,14 @@ interface NavCustomizationBase {
    *                 `clusterChecksHref` folded in here)
    *   - 'certs'   → the Certificate Health card
    *
-   * View-shaped targets (issues / gitops / checks) are also honored for any
-   * entry into that view — ⌘K, bookmarks, deep links — via a redirect effect
-   * in App.tsx, using window.location.replace so the transient /<view> URL
-   * stays out of history. 'certs' has no Radar view, so only the card consults
-   * it (window.location.assign — a real forward navigation the user initiated).
+   * View-shaped targets (issues / gitops / checks) are honored for every entry:
+   * in-app nav (Home cards, ⌘K, "view all") hands straight to the host from
+   * `setMainView` via `onHostNavigate` (smooth same-document hand-off, no
+   * intermediate /<view> mount); a direct /<view> URL (bookmark/deep link)
+   * funnels through a redirect effect that uses `window.location.replace` so
+   * the transient URL stays out of history. 'certs' has no Radar view, so only
+   * the card consults it. `onHostNavigate` is optional — without it everything
+   * falls back to `window.location` (a hard reload).
    */
   fleetTakeoverHref?: (target: FleetTakeoverTarget) => string | undefined;
   /**
@@ -68,6 +71,17 @@ interface NavCustomizationBase {
    * change. Remove in a major release once all consumers have migrated.
    */
   clusterChecksHref?: () => string;
+  /**
+   * Optional smooth navigator for host-owned URLs. When the host takes a
+   * destination over (`fleetTakeoverHref`, `crossClusterCompareHref`), Radar
+   * would otherwise hand off via `window.location` — a full document reload
+   * that cold-boots the host (white flash, re-auth, chrome teardown). A host
+   * that can navigate SAME-DOCUMENT (e.g. Radar Cloud's cross-tree swap with a
+   * View Transition) passes this so the hand-off morphs instead of reloading.
+   * Omitted → Radar falls back to `window.location` (hard nav), so standalone
+   * OSS / other hosts are unaffected.
+   */
+  onHostNavigate?: (url: string) => void;
   /**
    * Chrome level for embedded hosts. Default ('full', or omitted) renders
    * Radar's top bar + the view-switcher. 'none' suppresses BOTH — the host

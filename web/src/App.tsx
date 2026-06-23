@@ -179,6 +179,32 @@ function AppInner() {
   const capabilities = useCapabilitiesContext()
   const openLocalTerminal = useOpenLocalTerminal()
   const navCustomization = useNavCustomization()
+  // Hand off to a host-owned URL. The host's `onHostNavigate` (Radar Cloud's
+  // cross-tree swap) navigates same-document so the chrome morphs instead of
+  // cold-booting; without it we fall back to a hard `window.location` nav.
+  const goHost = useCallback(
+    (url: string) => {
+      if (navCustomization.onHostNavigate) navCustomization.onHostNavigate(url)
+      else window.location.assign(url)
+    },
+    [navCustomization],
+  )
+  // Resolve every host-takeover URL ONCE (memoized on navCustomization) so the
+  // setMainView intercept, redirect effect, nav-pill filtering, inline-view
+  // gating, and the cert click handler all consume the SAME value — host
+  // callbacks aren't guaranteed idempotent (scope / flags / signed URLs can
+  // shift between calls). undefined = not taken over → Radar renders the view
+  // itself. `clusterChecksHref` is the deprecated pre-1.7 hook, folded into the
+  // 'checks' target for back-compat.
+  const takeover: Record<FleetTakeoverTarget, string | undefined> = useMemo(
+    () => ({
+      issues: navCustomization.fleetTakeoverHref?.('issues'),
+      gitops: navCustomization.fleetTakeoverHref?.('gitops'),
+      checks: navCustomization.fleetTakeoverHref?.('checks') ?? navCustomization.clusterChecksHref?.(),
+      certs: navCustomization.fleetTakeoverHref?.('certs'),
+    }),
+    [navCustomization],
+  )
   const { pinned: navRailPinned, togglePinned: toggleNavRailPinned } = useNavRailPinned()
   // Standalone Radar gets the left nav rail; embedded hosts (Radar Hub) own
   // the left chrome via their own fleet rail and keep Radar's top-bar pills.
@@ -258,6 +284,20 @@ function AppInner() {
 
   // Set mainView by navigating to the path
   const setMainView = useCallback((view: ExtendedMainView, params?: Record<string, string>) => {
+    // Host takeover: fleet-shaped views (issues/gitops/checks) are owned by the
+    // host's fleet pages. Hand straight to the host instead of navigating to
+    // our own /<view> first — that intermediate hop mounts the view machinery
+    // and flashes the "Opening…" splash before the redirect effect bounces out.
+    // Skipping it makes the hand-off a single smooth cross-tree swap. (Direct
+    // /<view> URL entry still funnels through the redirect effect below.)
+    if (view === 'issues' || view === 'gitops' || view === 'checks') {
+      const href = takeover[view]
+      if (href) {
+        goHost(href)
+        return
+      }
+    }
+
     const path = view === 'home' ? '/' : `/${view}`
 
     // Start fresh — keep only cross-view params (namespaces), discard all view-specific ones
@@ -275,32 +315,15 @@ function AppInner() {
     }
 
     navigate({ pathname: path, search: newParams.toString() })
-  }, [navigate, searchParams])
+  }, [navigate, searchParams, takeover, goHost])
 
   // Cloud (embedded) takes over the "fleet-shaped" per-cluster views with its
   // own fleet pages scoped to this cluster — owned by the host's left rail — so
-  // Radar drops the matching pills (see the nav below) and any route into one
-  // of these views redirects to the host. Entry points that still land on the
-  // view — Home cards, ⌘K, WorkloadView's "view all" findings, bookmarks/deep
-  // links — all funnel through here. The view name doubles as the takeover
-  // target ('issues' | 'gitops' | 'checks'; 'audit' normalizes to 'checks' via
-  // getViewFromPath). `replace` (not assign) keeps the transient /<view> URL
-  // out of history so Back doesn't bounce off the redirect. Standalone OSS (no
-  // fleetTakeoverHref) is unaffected and renders the in-app view as before.
-  // Resolve every takeover target's host URL ONCE per render so the redirect
-  // effect, nav-pill filtering, inline-view gating, and the cert click handler
-  // all close over the SAME value — host callbacks aren't guaranteed idempotent
-  // (scope / flags / signed URLs can shift between calls). undefined = not taken
-  // over → Radar renders the view itself. `clusterChecksHref` is the deprecated
-  // pre-1.7 hook, folded into the 'checks' target for back-compat.
-  const fleetTakeoverHref = navCustomization.fleetTakeoverHref
-  const clusterChecksHref = navCustomization.clusterChecksHref
-  const takeover: Record<FleetTakeoverTarget, string | undefined> = {
-    issues: fleetTakeoverHref?.('issues'),
-    gitops: fleetTakeoverHref?.('gitops'),
-    checks: fleetTakeoverHref?.('checks') ?? clusterChecksHref?.(),
-    certs: fleetTakeoverHref?.('certs'),
-  }
+  // Radar drops the matching pills (see the nav below). In-app nav hands off in
+  // setMainView (above); direct /<view> URL entry funnels through the redirect
+  // effect below. Both consume the memoized `takeover` resolved above. Standalone
+  // OSS (no fleetTakeoverHref) is unaffected and renders the in-app view.
+  //
   // Has the host claimed this view? View-shaped targets only ('certs' has no
   // Radar view — only its Home card consults `takeover`). Used to drop the nav
   // pill and gate the inline view render in favor of the "Opening…" splash.
@@ -1645,7 +1668,7 @@ function AppInner() {
             // belongs in history. Omitted → the card falls back to Radar's own
             // TLS-secrets resource list.
             onNavigateToCerts={
-              takeover.certs ? () => window.location.assign(takeover.certs!) : undefined
+              takeover.certs ? () => goHost(takeover.certs!) : undefined
             }
           />
         )}
