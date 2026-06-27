@@ -475,20 +475,23 @@ export function getPodProblems(pod: any): PodProblem[] {
     problems.push({ severity: 'high', message: 'Evicted', detail: podStatusMessage })
   }
 
-  // Stuck terminating (zombie pod)
+  // Stuck terminating (zombie pod). Use the same threshold as the badge
+  // (TERMINATING_STUCK_MINUTES) so the drawer problem and the table badge flip
+  // together — firing at 60s while the badge stayed calm to 10m was a mismatch.
   if (pod.metadata?.deletionTimestamp) {
-    const deleteTime = new Date(pod.metadata.deletionTimestamp).getTime()
-    const ageSeconds = (Date.now() - deleteTime) / 1000
-    if (ageSeconds > 60) {
+    if (minutesSince(pod.metadata.deletionTimestamp) >= TERMINATING_STUCK_MINUTES) {
       problems.push({ severity: 'medium', message: 'Stuck Terminating' })
     }
   }
 
-  // Not ready (Running but containers not ready)
+  // Not ready (Running but containers not ready). Use the same containerSettledOk
+  // gate as getPodStatus so a completing Job pod (Running, container terminated
+  // exit 0, Ready=false) doesn't raise a drawer problem while the table badge
+  // stays calm — a settled/completed container is not "Not Ready".
   if (phase === 'Running') {
-    const readyContainers = containerStatuses.filter((c: any) => c.ready).length
+    const unsettled = containerStatuses.filter((c: any) => !containerSettledOk(c)).length
     const totalContainers = containerStatuses.length
-    if (totalContainers > 0 && readyContainers < totalContainers) {
+    if (totalContainers > 0 && unsettled > 0) {
       // Only add if we haven't already flagged a more specific issue
       const hasSpecificIssue = problems.some(p =>
         p.message.includes('Probe') || p.message.includes('CrashLoop') || p.message.includes('OOM')
@@ -646,7 +649,9 @@ export function getWorkloadStatus(resource: any, kind: string): StatusBadge {
     const ready = status.numberReady || 0
     const updated = status.updatedNumberScheduled || 0
 
-    if (desired === 0) return { text: '0 nodes', color: healthColors.unknown, level: 'unknown' }
+    // 0 desired = the node selector matches no nodes — intentional/idle, not a
+    // fault and not "unknown" (matches pkg/health.Workload). Sky.
+    if (desired === 0) return { text: '0 nodes', color: healthColors.neutral, level: 'neutral' }
     if (ready === desired && updated === desired) {
       return { text: `${ready}/${desired}`, color: healthColors.healthy, level: 'healthy' }
     }
@@ -1008,7 +1013,9 @@ export function getJobStatus(job: any): StatusBadge {
 
   const completeCond = conditions.find((c: any) => c.type === 'Complete' && c.status === 'True')
   if (completeCond) {
-    return { text: 'Complete', color: healthColors.healthy, level: 'healthy' }
+    // A completed Job is done by design — neutral/idle (sky), not the green of a
+    // serving workload (matches pkg/health.Workload).
+    return { text: 'Complete', color: healthColors.neutral, level: 'neutral' }
   }
 
   if (job.spec?.suspend) {

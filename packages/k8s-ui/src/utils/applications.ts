@@ -6,7 +6,7 @@
 // (internal/server/applications.go). Field names match the Go json tags.
 
 export type AppWorkloadClass = 'service' | 'worker' | 'job' | 'mixed' | 'unknown'
-export type AppHealth = 'healthy' | 'degraded' | 'unhealthy' | 'unknown'
+export type AppHealth = 'healthy' | 'degraded' | 'unhealthy' | 'neutral' | 'unknown'
 
 export interface AppWorkload {
   kind: string
@@ -582,7 +582,9 @@ export function foldAppGroups<T extends AppGroupFoldEntry>(
     const compMap = new Map<AppWorkloadClass, number>()
     let ready = 0
     let desired = 0
-    let health: AppHealth = 'unknown'
+    // Seed with the most-benign tier (rank 0) so the max-fold below has a valid
+    // identity now that `unknown` ranks above healthy — see worstHealth.
+    let health: AppHealth = 'neutral'
     for (const m of members) {
       const v = newest(m)
       // A fleet member spans several per-cluster envs; the host supplies them so
@@ -640,7 +642,9 @@ export function foldAppGroups<T extends AppGroupFoldEntry>(
 /** Normalize a wire health string to the AppHealth union (the health twin of
  *  workloadClassOf — keeps `as AppHealth` casts out of components). */
 export function healthOf(value: string | undefined): AppHealth {
-  return value === 'unhealthy' || value === 'degraded' || value === 'healthy' ? value : 'unknown'
+  return value === 'unhealthy' || value === 'degraded' || value === 'healthy' || value === 'neutral'
+    ? value
+    : 'unknown'
 }
 
 // -----------------------------------------------------------------------------
@@ -648,8 +652,16 @@ export function healthOf(value: string | undefined): AppHealth {
 // pale-pastel pills (which have no theme token) for the colored tiers.
 // -----------------------------------------------------------------------------
 
-export const HEALTH_ORDER: AppHealth[] = ['unhealthy', 'degraded', 'healthy', 'unknown']
-export const HEALTH_RANK: Record<string, number> = { unhealthy: 3, degraded: 2, healthy: 1, unknown: 0 }
+// Worst-first display + aggregation order. Mirrors the backend's
+// `pkg/health` Rank ordering (unhealthy > degraded > unknown > healthy ≈ neutral)
+// so the app rollup agrees with every other surface. `unknown` ranks ABOVE
+// healthy (a node-lost workload is worse than a running one); `neutral`
+// (intentional/idle) is the most-benign tier, so an all-idle app rolls up to
+// "Idle" while a mixed healthy+idle app still reads Healthy (healthy out-ranks
+// neutral in the max). NOTE: the previous map inverted this — it ranked
+// `unknown: 0` below `healthy`, disagreeing with the backend rollup.
+export const HEALTH_ORDER: AppHealth[] = ['unhealthy', 'degraded', 'unknown', 'healthy', 'neutral']
+export const HEALTH_RANK: Record<string, number> = { unhealthy: 4, degraded: 3, unknown: 2, healthy: 1, neutral: 0 }
 
 export interface HealthMeta {
   label: string
@@ -670,6 +682,7 @@ export const CHIP_TONE = {
   amber: 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-900',
   emerald: 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-900',
   blue: 'bg-blue-50 text-blue-700 ring-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:ring-blue-900',
+  sky: 'bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-950/40 dark:text-sky-300 dark:ring-sky-900',
   violet: 'bg-violet-50 text-violet-700 ring-violet-200 dark:bg-violet-950/40 dark:text-violet-300 dark:ring-violet-900',
   neutral: 'bg-theme-hover text-theme-text-secondary ring-theme-border',
   muted: 'bg-theme-hover text-theme-text-tertiary ring-theme-border',
@@ -679,6 +692,9 @@ export const HEALTH_META: Record<AppHealth, HealthMeta> = {
   unhealthy: { label: 'Down', bar: 'bg-rose-500', text: 'text-rose-600 dark:text-rose-400', pill: CHIP_TONE.rose },
   degraded: { label: 'Degraded', bar: 'bg-amber-500', text: 'text-amber-600 dark:text-amber-400', pill: CHIP_TONE.amber },
   healthy: { label: 'Healthy', bar: 'bg-emerald-500', text: 'text-emerald-600 dark:text-emerald-400', pill: CHIP_TONE.emerald },
+  // neutral = intentionally idle/off (every workload suspended or scaled to 0).
+  // Sky, calm — not "Healthy" (it isn't serving) and not a problem to act on.
+  neutral: { label: 'Idle', bar: 'bg-sky-500', text: 'text-sky-600 dark:text-sky-400', pill: CHIP_TONE.sky },
   unknown: { label: 'Unknown', bar: 'bg-slate-400', text: 'text-theme-text-tertiary', pill: CHIP_TONE.muted },
 }
 
@@ -726,9 +742,14 @@ export function workloadClassOf(value?: AppWorkloadClass): AppWorkloadClass {
   }
 }
 
-/** Worst health across a set of raw health strings. */
+/** Worst health across a set of raw health strings. Seeds with `neutral` — the
+ *  most-benign tier (rank 0) — so it acts as the max-fold identity: any real
+ *  value out-ranks it, an all-neutral set stays neutral, and healthy+neutral
+ *  resolves to healthy. (Seeding with `unknown` would be wrong now that `unknown`
+ *  ranks ABOVE healthy — an all-healthy set would never beat it and return
+ *  `unknown`. Mirrors pkg/health.WorseOf.) */
 export function worstHealth(hs: string[]): AppHealth {
-  let w: AppHealth = 'unknown'
+  let w: AppHealth = 'neutral'
   for (const h of hs) if ((HEALTH_RANK[h] ?? 0) > (HEALTH_RANK[w] ?? 0)) w = h as AppHealth
   return w
 }

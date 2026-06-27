@@ -548,6 +548,10 @@ export function PodRenderer({
             const lastTermination = status?.lastState?.terminated
             const currentWaiting = status?.state?.waiting
             const currentTerminated = status?.state?.terminated
+            // A container that exited 0 (a completed Job pod) is a success, not a
+            // failure — tone its badges/text sky, not red, so the drawer agrees
+            // with the calm "Completed" table badge instead of screaming red.
+            const terminatedOk = currentTerminated?.exitCode === 0
 
             return (
               <div key={container.name} className="card-inner-lg">
@@ -586,14 +590,17 @@ export function PodRenderer({
                     )}
                     <span className={clsx(
                       'badge',
-                      isReady ? SEVERITY_BADGE_BORDERED.success : SEVERITY_BADGE_BORDERED.error
+                      isReady ? SEVERITY_BADGE_BORDERED.success :
+                      terminatedOk ? SEVERITY_BADGE_BORDERED.info :
+                      SEVERITY_BADGE_BORDERED.error
                     )}>
-                      {isReady ? 'Ready' : 'Not Ready'}
+                      {isReady ? 'Ready' : terminatedOk ? 'Completed' : 'Not Ready'}
                     </span>
                     <span className={clsx(
                       'badge',
                       stateKey === 'running' ? SEVERITY_BADGE_BORDERED.success :
                       stateKey === 'waiting' ? SEVERITY_BADGE_BORDERED.warning :
+                      terminatedOk ? SEVERITY_BADGE_BORDERED.info :
                       SEVERITY_BADGE_BORDERED.error
                     )}>
                       {stateKey}
@@ -621,9 +628,10 @@ export function PodRenderer({
                       )}
                     </div>
                   )}
-                  {/* Show current terminated reason */}
+                  {/* Show current terminated reason — sky for a clean exit-0
+                      completion, red only for a genuine failure. */}
                   {currentTerminated?.reason && (
-                    <div className="text-red-400 flex items-center gap-1">
+                    <div className={clsx('flex items-center gap-1', terminatedOk ? 'text-sky-500 dark:text-sky-400' : 'text-red-400')}>
                       <span className="font-medium">Terminated: {currentTerminated.reason}</span>
                       {currentTerminated.exitCode !== undefined && currentTerminated.exitCode !== 0 && (
                         <span className="text-theme-text-tertiary">(exit code {currentTerminated.exitCode})</span>
@@ -795,8 +803,16 @@ export function PodRenderer({
         </Section>
       )}
 
-      {/* Conditions */}
-      <ConditionsSection conditions={data.status?.conditions} />
+      {/* Conditions. A completed pod's Ready/ContainersReady flip to False with
+          reason "PodCompleted" — that's expected for a finished pod, not a failure,
+          so tone it neutral (gray) instead of red. Gated on the PodCompleted reason
+          so a genuinely not-ready pod (any other reason) still reads red. */}
+      <ConditionsSection
+        conditions={data.status?.conditions}
+        getConditionTone={(cond) =>
+          cond?.status === 'False' && cond?.reason === 'PodCompleted' ? 'unknown' : undefined
+        }
+      />
 
       {/* Permissions (via ServiceAccount) — placed below the diagnostic-
        *  signal sections (status, containers, resource usage, conditions)

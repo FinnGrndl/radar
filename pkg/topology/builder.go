@@ -7429,10 +7429,16 @@ func extractKarpenterNodeClaimStatus(nc unstructured.Unstructured) HealthStatus 
 func extractNodeStatus(node corev1.Node) HealthStatus {
 	for _, cond := range node.Status.Conditions {
 		if cond.Type == corev1.NodeReady {
-			if cond.Status == corev1.ConditionTrue {
-				return StatusHealthy
+			if cond.Status != corev1.ConditionTrue {
+				return StatusUnhealthy
 			}
-			return StatusUnhealthy
+			// Ready but cordoned = lost scheduling capacity — degraded (amber),
+			// matching the node table badge + drawer + Cordoned audit, so the same
+			// node doesn't read green here while it's flagged elsewhere.
+			if node.Spec.Unschedulable {
+				return StatusDegraded
+			}
+			return StatusHealthy
 		}
 	}
 	return StatusUnknown
@@ -7440,14 +7446,15 @@ func extractNodeStatus(node corev1.Node) HealthStatus {
 
 // extractKedaScaledObjectStatus reads conditions and annotations from a KEDA ScaledObject
 func extractKedaScaledObjectStatus(so unstructured.Unstructured) HealthStatus {
-	// Check for Paused annotation (two variants)
+	// Check for Paused annotation (two variants). Paused = an operator
+	// deliberately froze autoscaling — intentional, so neutral (sky), not amber.
 	annotations := so.GetAnnotations()
 	if annotations != nil {
 		if paused, ok := annotations["autoscaling.keda.sh/paused"]; ok && paused == "true" {
-			return StatusDegraded
+			return StatusNeutral
 		}
 		if _, ok := annotations["autoscaling.keda.sh/paused-replicas"]; ok {
-			return StatusDegraded
+			return StatusNeutral
 		}
 	}
 
@@ -7487,9 +7494,10 @@ func extractKedaScaledObjectStatus(so unstructured.Unstructured) HealthStatus {
 		case "True":
 			return StatusHealthy
 		case "False":
-			// Idle (no triggers firing) is the normal resting state of a Ready
-			// scaler, not degradation — match the resource view's neutral tone.
-			return StatusHealthy
+			// Idle (no triggers firing, scaled to zero) is the normal resting
+			// state of a Ready scaler — intentional/off, so neutral (sky), not the
+			// green of an actively-serving workload.
+			return StatusNeutral
 		}
 	}
 
@@ -7521,25 +7529,25 @@ func extractKedaScaledJobStatus(sj unstructured.Unstructured) HealthStatus {
 		}
 	}
 
-	// Ready condition takes priority
-	if readyCond != nil {
-		switch readyCond["status"] {
-		case "True":
-			return StatusHealthy
-		case "False":
-			return StatusDegraded
-		}
+	// Ready=False = not operational; surface it before the idle check.
+	if readyCond != nil && readyCond["status"] == "False" {
+		return StatusDegraded
 	}
 
+	// Check Active before treating Ready=True as healthy: an operational scaler
+	// with no jobs running (Active=False) is intentionally idle → neutral (sky),
+	// not the green of a busy one. (Ready=True first would make Idle unreachable.)
 	if activeCond != nil {
 		switch activeCond["status"] {
 		case "True":
 			return StatusHealthy
 		case "False":
-			// Idle (no jobs currently scaled) is a Ready scaler's normal resting
-			// state, not degradation — match the resource view's neutral tone.
-			return StatusHealthy
+			return StatusNeutral
 		}
+	}
+
+	if readyCond != nil && readyCond["status"] == "True" {
+		return StatusHealthy
 	}
 
 	return StatusUnknown

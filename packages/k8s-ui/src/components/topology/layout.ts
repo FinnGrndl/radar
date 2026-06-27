@@ -731,11 +731,14 @@ export function buildHierarchicalElkGraph(
   }
 }
 
-// Lower number = higher severity
-const HEALTH_PRIORITY: Record<HealthStatus, number> = { unhealthy: 0, degraded: 1, unknown: 2, healthy: 3 }
+// Lower number = higher severity. `neutral` (intentional/idle) is the
+// most-benign tier, so a group whose every member is idle rolls up to neutral,
+// while a mixed healthy+idle group still reads healthy (healthy out-ranks
+// neutral). An empty/unresolved group defaults to healthy.
+const HEALTH_PRIORITY: Record<HealthStatus, number> = { unhealthy: 0, degraded: 1, unknown: 2, healthy: 3, neutral: 4 }
 
 function computeGroupHealth(memberIds: string[], nodeMap: Map<string, TopologyNode>): { worstStatus: HealthStatus; unhealthyCount: number } {
-  let worstPriority = 3
+  let worstPriority = Infinity
   let worstStatus: HealthStatus = 'healthy'
   let unhealthyCount = 0
   for (const id of memberIds) {
@@ -804,8 +807,11 @@ function computeWorkloadCards(
     })
     const primary = sorted[0]
 
-    // Compute worst health
-    let worstPriority = 3
+    // Compute worst health. Seed with Infinity (not 3) so an all-neutral
+    // component can surface neutral — `neutral` is priority 4 (most benign), so a
+    // `< 3` seed would never accept it and the card would stay green. Matches
+    // computeGroupHealth.
+    let worstPriority = Infinity
     let worstStatus: HealthStatus = 'healthy'
     for (const node of comp) {
       const p = HEALTH_PRIORITY[node.status] ?? 2

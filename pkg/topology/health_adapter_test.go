@@ -32,11 +32,11 @@ func TestGetPodStatusInspectsContainers(t *testing.T) {
 		t.Errorf("ready pod node color = %q, want healthy", got)
 	}
 
-	// Completed pod is neutral → renders gray (unknown) until topology gains a
-	// dedicated neutral tier.
+	// Completed pod is neutral → renders sky (StatusNeutral), distinct from the
+	// gray of an unknown/node-lost pod.
 	completed := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
-	if got := getPodStatus(completed); got != StatusUnknown {
-		t.Errorf("completed pod node color = %q, want unknown (interim neutral)", got)
+	if got := getPodStatus(completed); got != StatusNeutral {
+		t.Errorf("completed pod node color = %q, want neutral", got)
 	}
 
 	// Unschedulable pod reads degraded (the topology surface folds the scheduling
@@ -121,8 +121,8 @@ func TestPodSummaryStatusBuckets(t *testing.T) {
 
 func TestGetPVCStatusPendingIsNeutral(t *testing.T) {
 	pending := &corev1.PersistentVolumeClaim{Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}}
-	if got := getPVCStatus(pending); got != StatusUnknown {
-		t.Errorf("pending PVC = %q, want unknown (interim neutral; was degraded)", got)
+	if got := getPVCStatus(pending); got != StatusNeutral {
+		t.Errorf("pending PVC = %q, want neutral (was degraded)", got)
 	}
 	bound := &corev1.PersistentVolumeClaim{Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	if got := getPVCStatus(bound); got != StatusHealthy {
@@ -140,7 +140,26 @@ func TestGetJobStatusViaCanonical(t *testing.T) {
 	complete := &batchv1.Job{Status: batchv1.JobStatus{
 		Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
 	}}
-	if got := getJobStatus(complete); got != StatusUnknown {
-		t.Errorf("completed job = %q, want unknown (interim neutral)", got)
+	if got := getJobStatus(complete); got != StatusNeutral {
+		t.Errorf("completed job = %q, want neutral", got)
+	}
+}
+
+// TestExtractNodeStatusCordoned pins that a Ready-but-cordoned node reads degraded
+// in topology — matching the node table badge + drawer + Cordoned audit — instead
+// of green, which would contradict every other surface for the same node.
+func TestExtractNodeStatusCordoned(t *testing.T) {
+	ready := corev1.Node{Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}
+	if got := extractNodeStatus(ready); got != StatusHealthy {
+		t.Errorf("ready node = %q, want healthy", got)
+	}
+	cordoned := ready
+	cordoned.Spec.Unschedulable = true
+	if got := extractNodeStatus(cordoned); got != StatusDegraded {
+		t.Errorf("ready+cordoned node = %q, want degraded", got)
+	}
+	notReady := corev1.Node{Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}}}
+	if got := extractNodeStatus(notReady); got != StatusUnhealthy {
+		t.Errorf("not-ready node = %q, want unhealthy", got)
 	}
 }
