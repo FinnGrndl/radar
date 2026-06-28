@@ -48,30 +48,48 @@ func subjectRef(i Issue) Ref {
 
 // childCategories are the specific, root-cause symptoms that, when present for a
 // subject, make the parent workload-level rollup (workload_degraded /
-// rollout_stalled) redundant. A degraded Deployment with crashlooping pods is
-// ONE incident — the crashloop — not two; keeping both is the inverse of
-// "50 pods = 1 row".
+// rollout_stalled / job_failed) redundant. A degraded Deployment with
+// crashlooping pods is ONE incident — the crashloop — not two; keeping both is
+// the inverse of "50 pods = 1 row".
+//
+// The admission-rejection categories belong here because a workload that can't
+// create its pods reports ReplicaFailure → the rollup, while the scheduling
+// source names the actual rejection (no Pod exists yet). They are emitted on the
+// same owner subject via the same path as quota_exceeded, so they fold the same way.
 var childCategories = map[issuesapi.Category]bool{
-	issuesapi.CategoryCrashLoop:           true,
-	issuesapi.CategoryHighRestart:         true,
-	issuesapi.CategoryImagePullFailed:     true,
-	issuesapi.CategoryOOMKilled:           true,
-	issuesapi.CategoryContainerWaiting:    true,
-	issuesapi.CategoryInitContainerFailed: true,
-	issuesapi.CategoryLivenessProbeFail:   true,
-	issuesapi.CategoryReadinessFailed:     true,
-	issuesapi.CategoryUnschedulable:       true,
-	issuesapi.CategoryQuotaExceeded:       true,
-	issuesapi.CategoryMissingConfigRef:    true,
-	issuesapi.CategoryVolumeMountFailed:   true,
-	issuesapi.CategoryPVCPending:          true,
+	issuesapi.CategoryCrashLoop:                true,
+	issuesapi.CategoryHighRestart:              true,
+	issuesapi.CategoryImagePullFailed:          true,
+	issuesapi.CategoryOOMKilled:                true,
+	issuesapi.CategoryContainerWaiting:         true,
+	issuesapi.CategoryInitContainerFailed:      true,
+	issuesapi.CategoryLivenessProbeFail:        true,
+	issuesapi.CategoryReadinessFailed:          true,
+	issuesapi.CategoryUnschedulable:            true,
+	issuesapi.CategoryQuotaExceeded:            true,
+	issuesapi.CategoryAdmissionWebhookBlocking: true,
+	issuesapi.CategoryPodSecurityViolation:     true,
+	issuesapi.CategoryRBACForbidden:            true,
+	issuesapi.CategoryMissingConfigRef:         true,
+	issuesapi.CategoryVolumeMountFailed:        true,
+	issuesapi.CategoryPVCPending:               true,
 }
 
 // parentRollupCategories are the workload-level summaries that should be
 // suppressed when a more-specific child symptom exists for the same subject.
+//
+// job_failed is a rollup too: a failed Job's pods resolve their top owner to the
+// Job, so a BackoffLimitExceeded Job whose pods crashloop/OOM/can't-pull is one
+// incident — the pod cause is the root. A DeadlineExceeded job (the controller
+// killed a slow-but-not-crashing pod) has no qualifying child, so the severity
+// gate keeps its row. cronjob_failed is deliberately NOT here: "stale" /
+// "never-scheduled" means no Jobs were produced at all — an orthogonal failure
+// with no symptom children to fold into (a failed child Job surfaces as
+// job_failed on that Job, which already resolves to the CronJob subject).
 var parentRollupCategories = map[issuesapi.Category]bool{
 	issuesapi.CategoryWorkloadDegraded: true,
 	issuesapi.CategoryRolloutStalled:   true,
+	issuesapi.CategoryJobFailed:        true,
 }
 
 // dedupeWorkloadDegradedOverChild drops the parent workload rollup row
@@ -227,6 +245,143 @@ func dedupePVCPendingOverMissingRef(in []Issue) []Issue {
 	return out
 }
 
+// missingConfigCausesWaiting are the by-name dangling references whose failure
+// surfaces as a container stuck in Waiting (CreateContainerConfigError): the
+// referenced ConfigMap/Secret/ServiceAccount/imagePullSecret doesn't exist, so
+// the kubelet can't build the container config. "Missing PVC" is excluded — it
+// blocks scheduling (unschedulable), not container creation.
+var missingConfigCausesWaiting = map[string]bool{
+	"Missing ConfigMap":       true,
+	"Missing Secret":          true,
+	"Missing ServiceAccount":  true,
+	"Missing imagePullSecret": true,
+}
+
+// structuralRootOverSymptom drops a runtime SYMPTOM row for a resource when a
+// structural root row — a by-name dangling reference the detector resolved —
+// exists for the SAME resource. The structural row names the exact broken object
+// and the concrete fix and is the reason the symptom exists, so it is the richer
+// row and always wins. Keyed on the resource itself (not the owner subject):
+// both rows describe the same Pod/HPA, emitted by different detectors.
+//
+// Two evidence properties of the dropped symptom are donated to the surviving
+// root so the fold loses nothing the operator needs:
+//   - Severity: the root is promoted to the highest severity among the symptoms
+//     it absorbs, so folding can never lower the displayed incident severity (the
+//     floor dedupeWorkloadDegradedOverChild enforces, here via promotion since the
+//     root is the survivor). A by-name root is stamped from resource age and has
+//     no timing of its own.
+//   - Timing: the root inherits the symptom's issue_timing when it has none. The
+//     symptom (e.g. an HPA cannot-scale derived from the ScalingActive condition)
+//     can carry the only accurate "started after the resource was healthy" signal;
+//     disagreeing symptoms donate nothing, mirroring the rollup pass.
+func structuralRootOverSymptom(in []Issue, isRoot, isSymptom func(Issue) bool) []Issue {
+	rootExists := map[string]bool{}
+	for _, i := range in {
+		if isRoot(i) {
+			rootExists[issueResourceKey(i)] = true
+		}
+	}
+	if len(rootExists) == 0 {
+		return in
+	}
+	foldedSev := map[string]int{}
+	foldedTiming := map[string]string{}
+	foldedBasis := map[string]string{}
+	timingConflict := map[string]bool{}
+	out := in[:0]
+	for _, i := range in {
+		if isSymptom(i) && rootExists[issueResourceKey(i)] {
+			k := issueResourceKey(i)
+			if r := SeverityRank(i.Severity); r > foldedSev[k] {
+				foldedSev[k] = r
+			}
+			if i.IssueTiming != "" && !timingConflict[k] {
+				if prev, ok := foldedTiming[k]; ok && prev != i.IssueTiming {
+					timingConflict[k] = true
+				} else if !ok {
+					foldedTiming[k] = i.IssueTiming
+					foldedBasis[k] = i.IssueTimingBasis
+				}
+			}
+			continue
+		}
+		out = append(out, i)
+	}
+	for idx := range out {
+		i := &out[idx]
+		if !isRoot(*i) {
+			continue
+		}
+		k := issueResourceKey(*i)
+		if r, ok := foldedSev[k]; ok && r > SeverityRank(i.Severity) {
+			i.Severity = severityForRank(r)
+		}
+		if i.IssueTiming == "" && !timingConflict[k] {
+			if t := foldedTiming[k]; t != "" {
+				i.IssueTiming = t
+				i.IssueTimingBasis = foldedBasis[k]
+			}
+		}
+	}
+	return out
+}
+
+// dedupeContainerWaitingOverMissingRef drops the generic container_waiting pod
+// row when a missing ConfigMap/Secret/ServiceAccount/imagePullSecret was
+// structurally detected for the same pod: the dangling ref IS why the container
+// can't start, and the missing-ref row names the exact object + fix.
+func dedupeContainerWaitingOverMissingRef(in []Issue) []Issue {
+	return structuralRootOverSymptom(in,
+		func(i Issue) bool {
+			return i.Source == SourceMissingRef && i.Kind == "Pod" &&
+				i.Category == issuesapi.CategoryMissingConfigRef && missingConfigCausesWaiting[i.Reason]
+		},
+		func(i Issue) bool {
+			// Only the config-stage waiting reason is caused by a missing
+			// CM/Secret/SA — a multi-container pod can carry a different waiting
+			// reason (RunContainerError, ContainerCreating) from an unrelated
+			// container, which must not be folded away.
+			return i.Source == SourceProblem && i.Kind == "Pod" &&
+				i.Category == issuesapi.CategoryContainerWaiting && i.Reason == "CreateContainerConfigError"
+		})
+}
+
+// dedupeImagePullOverMissingPullSecret drops the image_pull_failed pod row when
+// the missing imagePullSecret was structurally detected for the same pod. Gated
+// tightly to the pull-secret reason: an unrelated image_pull_failed (wrong tag,
+// rate-limit) on the same pod has a different root and must survive.
+func dedupeImagePullOverMissingPullSecret(in []Issue) []Issue {
+	return structuralRootOverSymptom(in,
+		func(i Issue) bool {
+			return i.Source == SourceMissingRef && i.Kind == "Pod" &&
+				i.Category == issuesapi.CategoryMissingConfigRef && i.Reason == "Missing imagePullSecret"
+		},
+		func(i Issue) bool {
+			return i.Source == SourceProblem && i.Kind == "Pod" &&
+				i.Category == issuesapi.CategoryImagePullFailed
+		})
+}
+
+// dedupeHPAOverMissingTarget drops the hpa_limited_or_failed row when the
+// autoscaler's scaleTargetRef points at a workload that doesn't exist. When the
+// target is missing, every HPA/KEDA condition (can't-scale, no-metrics) is
+// downstream of that one fact — there is no target to scale or read metrics for —
+// so the missing-ref row is the single root. (When the target EXISTS there is no
+// missing-ref row, so a genuine maxed/metrics problem is never touched.)
+func dedupeHPAOverMissingTarget(in []Issue) []Issue {
+	isAutoscaler := func(kind string) bool {
+		return kind == "HorizontalPodAutoscaler" || kind == "ScaledObject"
+	}
+	return structuralRootOverSymptom(in,
+		func(i Issue) bool {
+			return i.Source == SourceMissingRef && isAutoscaler(i.Kind) && i.Reason == "Missing scaleTargetRef"
+		},
+		func(i Issue) bool {
+			return i.Category == issuesapi.CategoryHPALimitedOrFailed && isAutoscaler(i.Kind)
+		})
+}
+
 func isMissingRefEchoCondition(i Issue) bool {
 	if i.Group != "gateway.networking.k8s.io" {
 		return false
@@ -241,6 +396,21 @@ func isMissingRefEchoCondition(i Issue) bool {
 
 func issueResourceCategoryKey(i Issue) string {
 	return resourceKey(i.Group, i.Kind, i.Namespace, i.Name) + "\x00" + string(i.Category)
+}
+
+// issueResourceKey is the canonical key for the issue's OWN resource (not its
+// owner subject) — used by same-resource cross-detector dedup where two
+// detectors describe the same Pod/HPA.
+func issueResourceKey(i Issue) string {
+	return resourceKey(i.Group, i.Kind, i.Namespace, i.Name)
+}
+
+// severityForRank inverts SeverityRank for the two issue-layer severities.
+func severityForRank(r int) Severity {
+	if r >= 3 {
+		return SeverityCritical
+	}
+	return SeverityWarning
 }
 
 // subjectKeyOf is the canonical string key for a subject Ref — the same

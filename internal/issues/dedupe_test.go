@@ -42,6 +42,175 @@ func TestDedupePodSchedulingOverProblem(t *testing.T) {
 	})
 }
 
+func TestDedupeWorkloadDegradedOverChild_Phase0(t *testing.T) {
+	dep := Ref{Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web"}
+
+	hasCategory := func(out []Issue, c issuesapi.Category) bool {
+		for _, i := range out {
+			if i.Category == c {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("job_failed folds into crashlooping child pod", func(t *testing.T) {
+		job := Ref{Group: "batch", Kind: "Job", Namespace: "ns", Name: "import"}
+		jobFailed := Issue{Source: SourceProblem, Group: "batch", Kind: "Job", Namespace: "ns", Name: "import",
+			Category: issuesapi.CategoryJobFailed, Severity: SeverityCritical, Reason: "BackoffLimitExceeded"}
+		childCrash := Issue{Source: SourceProblem, Kind: "Pod", Namespace: "ns", Name: "import-xyz",
+			Owner: job, Category: issuesapi.CategoryCrashLoop, Severity: SeverityCritical}
+		out := dedupeWorkloadDegradedOverChild([]Issue{jobFailed, childCrash})
+		if hasCategory(out, issuesapi.CategoryJobFailed) {
+			t.Fatalf("job_failed rollup should fold into the crashloop child, got %+v", out)
+		}
+		if !hasCategory(out, issuesapi.CategoryCrashLoop) {
+			t.Fatalf("crashloop child should survive as the root cause, got %+v", out)
+		}
+	})
+
+	t.Run("job_failed survives DeadlineExceeded with no crash child", func(t *testing.T) {
+		jobFailed := Issue{Source: SourceProblem, Group: "batch", Kind: "Job", Namespace: "ns", Name: "slow",
+			Category: issuesapi.CategoryJobFailed, Severity: SeverityCritical, Reason: "DeadlineExceeded"}
+		out := dedupeWorkloadDegradedOverChild([]Issue{jobFailed})
+		if !hasCategory(out, issuesapi.CategoryJobFailed) {
+			t.Fatalf("DeadlineExceeded job_failed with no child must survive, got %+v", out)
+		}
+	})
+
+	t.Run("rollout_stalled folds into admission rejection on same owner", func(t *testing.T) {
+		rollout := Issue{Source: SourceProblem, Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web",
+			Category: issuesapi.CategoryRolloutStalled, Severity: SeverityCritical, Reason: "ReplicaFailure"}
+		admission := Issue{Source: SourceScheduling, Group: "apps", Kind: "ReplicaSet", Namespace: "ns", Name: "web-abc",
+			Owner: dep, Category: issuesapi.CategoryAdmissionWebhookBlocking, Severity: SeverityCritical}
+		out := dedupeWorkloadDegradedOverChild([]Issue{rollout, admission})
+		if hasCategory(out, issuesapi.CategoryRolloutStalled) {
+			t.Fatalf("rollout_stalled should fold into the admission rejection root, got %+v", out)
+		}
+		if !hasCategory(out, issuesapi.CategoryAdmissionWebhookBlocking) {
+			t.Fatalf("admission rejection should survive as the root cause, got %+v", out)
+		}
+	})
+
+	t.Run("rollout_stalled folds into rbac_forbidden on same owner", func(t *testing.T) {
+		rollout := Issue{Source: SourceProblem, Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web",
+			Category: issuesapi.CategoryRolloutStalled, Severity: SeverityCritical, Reason: "ReplicaFailure"}
+		rbac := Issue{Source: SourceScheduling, Group: "apps", Kind: "ReplicaSet", Namespace: "ns", Name: "web-abc",
+			Owner: dep, Category: issuesapi.CategoryRBACForbidden, Severity: SeverityCritical}
+		out := dedupeWorkloadDegradedOverChild([]Issue{rollout, rbac})
+		if hasCategory(out, issuesapi.CategoryRolloutStalled) {
+			t.Fatalf("rollout_stalled should fold into rbac_forbidden, got %+v", out)
+		}
+	})
+
+	t.Run("cronjob_failed is not a rollup and survives alongside an unrelated job_failed", func(t *testing.T) {
+		cron := Issue{Source: SourceProblem, Group: "batch", Kind: "CronJob", Namespace: "ns", Name: "nightly",
+			Category: issuesapi.CategoryCronJobFailed, Severity: SeverityWarning, Reason: "stale"}
+		// Unrelated job (different subject) with a crashloop child — must not affect the cronjob row.
+		otherJob := Ref{Group: "batch", Kind: "Job", Namespace: "ns", Name: "other"}
+		jobFailed := Issue{Source: SourceProblem, Group: "batch", Kind: "Job", Namespace: "ns", Name: "other",
+			Category: issuesapi.CategoryJobFailed, Severity: SeverityCritical}
+		child := Issue{Source: SourceProblem, Kind: "Pod", Namespace: "ns", Name: "other-xyz",
+			Owner: otherJob, Category: issuesapi.CategoryCrashLoop, Severity: SeverityCritical}
+		out := dedupeWorkloadDegradedOverChild([]Issue{cron, jobFailed, child})
+		if !hasCategory(out, issuesapi.CategoryCronJobFailed) {
+			t.Fatalf("cronjob_failed must never be folded as a rollup, got %+v", out)
+		}
+	})
+
+	t.Run("severity gate: critical rollup with only a warning child is kept", func(t *testing.T) {
+		degraded := Issue{Source: SourceProblem, Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web",
+			Category: issuesapi.CategoryWorkloadDegraded, Severity: SeverityCritical, Reason: "0/3 available"}
+		waiting := Issue{Source: SourceProblem, Kind: "Pod", Namespace: "ns", Name: "web-abc",
+			Owner: dep, Category: issuesapi.CategoryContainerWaiting, Severity: SeverityWarning}
+		out := dedupeWorkloadDegradedOverChild([]Issue{degraded, waiting})
+		if !hasCategory(out, issuesapi.CategoryWorkloadDegraded) {
+			t.Fatalf("critical rollup must not be downgraded to a warning child, got %+v", out)
+		}
+	})
+}
+
+func TestStructuralRootOverSymptom_Phase1(t *testing.T) {
+	dep := Ref{Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web"}
+
+	has := func(out []Issue, src Source, c issuesapi.Category, name string) bool {
+		for _, i := range out {
+			if i.Source == src && i.Category == c && i.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	sevOf := func(out []Issue, c issuesapi.Category, name string) Severity {
+		for _, i := range out {
+			if i.Category == c && i.Name == name {
+				return i.Severity
+			}
+		}
+		return ""
+	}
+
+	t.Run("missing Secret folds container_waiting on same pod", func(t *testing.T) {
+		missing := Issue{Source: SourceMissingRef, Kind: "Pod", Namespace: "ns", Name: "web-abc", Owner: dep,
+			Category: issuesapi.CategoryMissingConfigRef, Reason: "Missing Secret", Severity: SeverityCritical}
+		waiting := Issue{Source: SourceProblem, Kind: "Pod", Namespace: "ns", Name: "web-abc", Owner: dep,
+			Category: issuesapi.CategoryContainerWaiting, Reason: "CreateContainerConfigError", Severity: SeverityWarning}
+		out := dedupeContainerWaitingOverMissingRef([]Issue{missing, waiting})
+		if has(out, SourceProblem, issuesapi.CategoryContainerWaiting, "web-abc") {
+			t.Fatalf("container_waiting should fold into the missing-Secret root, got %+v", out)
+		}
+		if !has(out, SourceMissingRef, issuesapi.CategoryMissingConfigRef, "web-abc") {
+			t.Fatalf("missing-ref root should survive, got %+v", out)
+		}
+	})
+
+	t.Run("missing Secret does NOT fold an unrelated image_pull on same pod", func(t *testing.T) {
+		missing := Issue{Source: SourceMissingRef, Kind: "Pod", Namespace: "ns", Name: "web-abc",
+			Category: issuesapi.CategoryMissingConfigRef, Reason: "Missing Secret", Severity: SeverityCritical}
+		imgPull := Issue{Source: SourceProblem, Kind: "Pod", Namespace: "ns", Name: "web-abc",
+			Category: issuesapi.CategoryImagePullFailed, Reason: "ErrImagePull", Severity: SeverityWarning}
+		out := dedupeImagePullOverMissingPullSecret([]Issue{missing, imgPull})
+		if !has(out, SourceProblem, issuesapi.CategoryImagePullFailed, "web-abc") {
+			t.Fatalf("image_pull_failed must survive when the root is a Secret (not a pull secret), got %+v", out)
+		}
+	})
+
+	t.Run("missing imagePullSecret folds image_pull on same pod", func(t *testing.T) {
+		missing := Issue{Source: SourceMissingRef, Kind: "Pod", Namespace: "ns", Name: "web-abc",
+			Category: issuesapi.CategoryMissingConfigRef, Reason: "Missing imagePullSecret", Severity: SeverityCritical}
+		imgPull := Issue{Source: SourceProblem, Kind: "Pod", Namespace: "ns", Name: "web-abc",
+			Category: issuesapi.CategoryImagePullFailed, Reason: "ImagePullBackOff", Severity: SeverityWarning}
+		out := dedupeImagePullOverMissingPullSecret([]Issue{missing, imgPull})
+		if has(out, SourceProblem, issuesapi.CategoryImagePullFailed, "web-abc") {
+			t.Fatalf("image_pull_failed should fold into the missing-imagePullSecret root, got %+v", out)
+		}
+	})
+
+	t.Run("HPA missing target folds the hpa condition row and promotes severity", func(t *testing.T) {
+		missing := Issue{Source: SourceMissingRef, Kind: "HorizontalPodAutoscaler", Group: "autoscaling", Namespace: "ns", Name: "web-hpa",
+			Category: issuesapi.CategoryMissingConfigRef, Reason: "Missing scaleTargetRef", Severity: SeverityWarning}
+		cond := Issue{Source: SourceProblem, Kind: "HorizontalPodAutoscaler", Group: "autoscaling", Namespace: "ns", Name: "web-hpa",
+			Category: issuesapi.CategoryHPALimitedOrFailed, Severity: SeverityCritical}
+		out := dedupeHPAOverMissingTarget([]Issue{missing, cond})
+		if has(out, SourceProblem, issuesapi.CategoryHPALimitedOrFailed, "web-hpa") {
+			t.Fatalf("hpa condition should fold into the missing-target root, got %+v", out)
+		}
+		// Floor preserved: warning root absorbing a critical symptom is promoted.
+		if sevOf(out, issuesapi.CategoryMissingConfigRef, "web-hpa") != SeverityCritical {
+			t.Fatalf("surviving root must be promoted to critical so folding doesn't downgrade, got %s", sevOf(out, issuesapi.CategoryMissingConfigRef, "web-hpa"))
+		}
+	})
+
+	t.Run("no missing-ref root is a no-op", func(t *testing.T) {
+		waiting := Issue{Source: SourceProblem, Kind: "Pod", Namespace: "ns", Name: "lonely",
+			Category: issuesapi.CategoryContainerWaiting, Severity: SeverityWarning}
+		out := dedupeContainerWaitingOverMissingRef([]Issue{waiting})
+		if len(out) != 1 {
+			t.Fatalf("expected the lone container_waiting to survive, got %+v", out)
+		}
+	})
+}
+
 func TestDedupeConditionOverMissingRef(t *testing.T) {
 	missing := Issue{
 		Source:    SourceMissingRef,
