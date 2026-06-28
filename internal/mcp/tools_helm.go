@@ -9,6 +9,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/skyhook-io/radar/internal/helm"
+	"github.com/skyhook-io/radar/internal/k8s"
+	aicontext "github.com/skyhook-io/radar/pkg/ai/context"
 	pkgauth "github.com/skyhook-io/radar/pkg/auth"
 )
 
@@ -32,9 +34,9 @@ type listHelmReleasesInput struct {
 type getHelmReleaseInput struct {
 	Namespace string `json:"namespace" jsonschema:"Helm release storage namespace; use storageNamespace from list_helm_releases when present, otherwise namespace"`
 	Name      string `json:"name" jsonschema:"release name"`
-	Include   string `json:"include,omitempty" jsonschema:"comma-separated extras to include: values, history, operations, diff. Example: values,history"`
-	DiffRev1  int    `json:"diff_revision_1,omitempty" jsonschema:"first revision for diff; only used when include contains diff"`
-	DiffRev2  int    `json:"diff_revision_2,omitempty" jsonschema:"second revision for diff; only used when include contains diff, defaults to current"`
+	Include   string `json:"include,omitempty" jsonschema:"comma-separated extras to include: values (key-aware redacted), history, operations, diff, values_diff, notes_diff, resource_diff. Hook diagnostics are included by default when present. Example: values,history"`
+	DiffRev1  int    `json:"diff_revision_1,omitempty" jsonschema:"first revision for revision diffs; used when include contains diff, values_diff, notes_diff, or resource_diff"`
+	DiffRev2  int    `json:"diff_revision_2,omitempty" jsonschema:"second revision for revision diffs; used when include contains diff, values_diff, notes_diff, or resource_diff; defaults to current"`
 }
 
 // Helm tool handlers
@@ -82,6 +84,7 @@ func handleGetHelmRelease(ctx context.Context, req *mcp.CallToolRequest, input g
 	if err != nil {
 		return nil, nil, fmt.Errorf("release %s/%s not found: %w", input.Namespace, input.Name, err)
 	}
+	helm.EnrichHookDiagnosticsWithClusterEvidence(ctx, detail, k8s.ClientFromContext(ctx))
 
 	// Build a response map starting with the core detail
 	result := map[string]any{
@@ -118,6 +121,9 @@ func handleGetHelmRelease(ctx context.Context, req *mcp.CallToolRequest, input g
 	if len(detail.Hooks) > 0 {
 		result["hooks"] = detail.Hooks
 	}
+	if len(detail.HookDiagnostics) > 0 {
+		result["hookDiagnostics"] = detail.HookDiagnostics
+	}
 	if len(detail.Dependencies) > 0 {
 		result["dependencies"] = detail.Dependencies
 	}
@@ -141,7 +147,8 @@ func handleGetHelmRelease(ctx context.Context, req *mcp.CallToolRequest, input g
 				log.Printf("[mcp] Failed to get values for %s/%s: %v", input.Namespace, input.Name, err)
 				result["valuesError"] = err.Error()
 			} else {
-				result["values"] = values.UserSupplied
+				result["values"] = redactedHelmValues(values.UserSupplied)
+				result["valuesRedacted"] = true
 			}
 		}
 	}
@@ -154,20 +161,14 @@ func handleGetHelmRelease(ctx context.Context, req *mcp.CallToolRequest, input g
 	}
 
 	if includes["diff"] {
-		switch {
-		case input.DiffRev1 <= 0:
-			// Surface the contract gap instead of silently producing no `diff`
-			// field — the agent can't tell whether the call was a no-op
-			// versus the diff being empty.
-			result["diffError"] = "include=diff requires diff_revision_1 (the earlier revision to compare); diff_revision_2 defaults to current"
-		case gatedSensitive:
+		if errMsg := diffRevisionError(input, detail.Revision, "diff"); errMsg != "" {
+			// Surface the contract gap instead of silently producing no diff.
+			result["diffError"] = errMsg
+		} else if gatedSensitive {
 			result["diffError"] = fmt.Sprintf("Radar Cloud role %q cannot view Helm release diffs (requires member or higher)", cloudRole.String())
-		default:
-			rev2 := input.DiffRev2
-			if rev2 == 0 {
-				rev2 = detail.Revision // default to current revision
-			}
-			diff, err := helmClient.GetManifestDiffAsUser(input.Namespace, input.Name, input.DiffRev1, rev2, username, groups)
+		} else {
+			rev1, rev2 := diffRevisions(input, detail.Revision)
+			diff, err := helmClient.GetManifestDiffAsUser(input.Namespace, input.Name, rev1, rev2, username, groups)
 			if err != nil {
 				log.Printf("[mcp] Failed to get manifest diff for %s/%s: %v", input.Namespace, input.Name, err)
 				result["diffError"] = err.Error()
@@ -176,8 +177,79 @@ func handleGetHelmRelease(ctx context.Context, req *mcp.CallToolRequest, input g
 			}
 		}
 	}
+	if includes["values_diff"] {
+		if errMsg := diffRevisionError(input, detail.Revision, "values_diff"); errMsg != "" {
+			result["valuesDiffError"] = errMsg
+		} else if gatedSensitive {
+			result["valuesDiffError"] = fmt.Sprintf("Radar Cloud role %q cannot view Helm release value diffs (requires member or higher)", cloudRole.String())
+		} else {
+			rev1, rev2 := diffRevisions(input, detail.Revision)
+			diff, err := helmClient.GetValuesDiffAsUser(input.Namespace, input.Name, rev1, rev2, false, username, groups)
+			if err != nil {
+				log.Printf("[mcp] Failed to get values diff for %s/%s: %v", input.Namespace, input.Name, err)
+				result["valuesDiffError"] = err.Error()
+			} else {
+				diff.Diff = aicontext.RedactSecrets(diff.Diff)
+				result["valuesDiff"] = diff
+			}
+		}
+	}
+	if includes["notes_diff"] {
+		if errMsg := diffRevisionError(input, detail.Revision, "notes_diff"); errMsg != "" {
+			result["notesDiffError"] = errMsg
+		} else if gatedSensitive {
+			result["notesDiffError"] = fmt.Sprintf("Radar Cloud role %q cannot view Helm release notes diffs (requires member or higher)", cloudRole.String())
+		} else {
+			rev1, rev2 := diffRevisions(input, detail.Revision)
+			diff, err := helmClient.GetNotesDiffAsUser(input.Namespace, input.Name, rev1, rev2, username, groups)
+			if err != nil {
+				log.Printf("[mcp] Failed to get notes diff for %s/%s: %v", input.Namespace, input.Name, err)
+				result["notesDiffError"] = err.Error()
+			} else {
+				result["notesDiff"] = diff
+			}
+		}
+	}
+	if includes["resource_diff"] {
+		if errMsg := diffRevisionError(input, detail.Revision, "resource_diff"); errMsg != "" {
+			result["resourceDiffError"] = errMsg
+		} else if gatedSensitive {
+			result["resourceDiffError"] = fmt.Sprintf("Radar Cloud role %q cannot view Helm release resource diffs (requires member or higher)", cloudRole.String())
+		} else {
+			rev1, rev2 := diffRevisions(input, detail.Revision)
+			diff, err := helmClient.GetResourceDiffAsUser(input.Namespace, input.Name, rev1, rev2, username, groups)
+			if err != nil {
+				log.Printf("[mcp] Failed to get resource diff for %s/%s: %v", input.Namespace, input.Name, err)
+				result["resourceDiffError"] = err.Error()
+			} else {
+				result["resourceDiff"] = diff
+			}
+		}
+	}
 
 	return toJSONResult(result)
+}
+
+func diffRevisionError(input getHelmReleaseInput, currentRevision int, include string) string {
+	if input.DiffRev1 <= 0 {
+		return fmt.Sprintf("include=%s requires diff_revision_1 (the earlier revision to compare); diff_revision_2 defaults to current", include)
+	}
+	_, rev2 := diffRevisions(input, currentRevision)
+	if rev2 <= 0 {
+		return fmt.Sprintf("include=%s requires a positive diff_revision_2 or a current release revision", include)
+	}
+	if input.DiffRev1 == rev2 {
+		return fmt.Sprintf("include=%s requires different revisions; diff_revision_1 and diff_revision_2 both resolved to %d", include, rev2)
+	}
+	return ""
+}
+
+func diffRevisions(input getHelmReleaseInput, currentRevision int) (int, int) {
+	rev2 := input.DiffRev2
+	if rev2 == 0 {
+		rev2 = currentRevision
+	}
+	return input.DiffRev1, rev2
 }
 
 func mergeHelmOperations(operations []helm.HelmOperation, lastOperation *helm.HelmOperation) []helm.HelmOperation {
@@ -209,6 +281,43 @@ func helmOperationKey(operation helm.HelmOperation) string {
 		operation.RollbackRevision,
 		operation.TargetRevision,
 	)
+}
+
+func redactedHelmValues(values map[string]any) map[string]any {
+	if values == nil {
+		return map[string]any{}
+	}
+	cloned, ok := cloneHelmValue(values).(map[string]any)
+	if !ok {
+		return map[string]any{}
+	}
+	aicontext.RedactInlineSecrets(cloned)
+	return cloned
+}
+
+func cloneHelmValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[key] = cloneHelmValue(item)
+		}
+		return out
+	case map[any]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[fmt.Sprint(key)] = cloneHelmValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = cloneHelmValue(item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 // parseIncludes parses a comma-separated include string into a set.

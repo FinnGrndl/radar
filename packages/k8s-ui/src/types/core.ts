@@ -616,6 +616,7 @@ export interface HelmReleaseDetail {
   healthIssue?: string
   healthSummary?: string
   hooks?: HelmHook[]
+  hookDiagnostics?: HookDiagnostic[]
   readme?: string
   dependencies?: ChartDependency[]
   lastOperation?: HelmOperation
@@ -627,10 +628,78 @@ export interface HelmReleaseDetail {
 
 export interface HelmHook {
   name: string
+  namespace?: string
   kind: string
+  path?: string
   events: string[]
   weight: number
   status?: string
+  startedAt?: string
+  completedAt?: string
+  deletePolicies?: string[]
+  outputLogPolicies?: string[]
+}
+
+export interface HookDiagnostic {
+  name: string
+  namespace?: string
+  kind: string
+  events?: string[]
+  phase: string
+  message: string
+  evidence?: HookEvidence
+  evidenceUnavailable?: boolean
+  evidenceUnavailableReason?: string
+}
+
+export interface HookEvidence {
+  summary?: string
+  jobs?: HookJobEvidence[]
+  pods?: HookPodEvidence[]
+  events?: HookEventEvidence[]
+  logs?: HookLogEvidence[]
+  errors?: string[]
+}
+
+export interface HookJobEvidence {
+  name: string
+  namespace?: string
+  status?: string
+  active?: number
+  succeeded?: number
+  failed?: number
+  conditions?: string[]
+}
+
+export interface HookPodEvidence {
+  name: string
+  namespace?: string
+  phase?: string
+  ready?: string
+  restartCount?: number
+  reason?: string
+  message?: string
+}
+
+export interface HookEventEvidence {
+  involvedKind: string
+  involvedName: string
+  type?: string
+  reason?: string
+  message?: string
+  count?: number
+  lastSeen?: string
+}
+
+export interface HookLogEvidence {
+  pod: string
+  container: string
+  previous?: boolean
+  lines?: string[]
+  totalLines?: number
+  matchedLines?: number
+  fallback?: boolean
+  error?: string
 }
 
 export interface ChartDependency {
@@ -658,10 +727,38 @@ export interface HelmValues {
   computed?: Record<string, unknown>
 }
 
+export interface ValuesDiff {
+  revision1: number
+  revision2: number
+  allValues: boolean
+  diff: string
+}
+
 export interface ManifestDiff {
   revision1: number
   revision2: number
   diff: string
+}
+
+export interface NotesDiff {
+  revision1: number
+  revision2: number
+  diff: string
+}
+
+export interface HelmResourceRef {
+  kind: string
+  apiVersion?: string
+  name: string
+  namespace: string
+}
+
+export interface ResourceDiff {
+  revision1: number
+  revision2: number
+  added: HelmResourceRef[]
+  removed: HelmResourceRef[]
+  unchanged: HelmResourceRef[]
 }
 
 // Selected Helm release (for drawer state)

@@ -3,24 +3,35 @@ package helm
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/skyhook-io/radar/pkg/helmhistory"
 
+	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/cli"
+	kubefake "helm.sh/helm/v3/pkg/kube/fake"
 	"helm.sh/helm/v3/pkg/release"
+	helmstorage "helm.sh/helm/v3/pkg/storage"
+	storagedriver "helm.sh/helm/v3/pkg/storage/driver"
 	helmtime "helm.sh/helm/v3/pkg/time"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 func TestFindBestUpgradeVersion(t *testing.T) {
@@ -463,6 +474,483 @@ func TestHelmReleaseRowsFromStorageSnapshot_UsesDetailHistoryWindow(t *testing.T
 	if got := len(snapshot.histories["demo/long-lived"]); got != releaseHistoryMax {
 		t.Fatalf("history window = %d, want %d", got, releaseHistoryMax)
 	}
+}
+
+func TestComputeValuesDiffIsStableForReorderedMaps(t *testing.T) {
+	left := &HelmValues{UserSupplied: map[string]any{
+		"image": map[string]any{
+			"tag":        "1.0.0",
+			"repository": "example/cart",
+		},
+		"replicaCount": 2,
+	}}
+	right := &HelmValues{UserSupplied: map[string]any{
+		"replicaCount": 2,
+		"image": map[string]any{
+			"repository": "example/cart",
+			"tag":        "1.0.0",
+		},
+	}}
+
+	diff, err := computeValuesDiff(left, right, 1, 2, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diffHasBodyChange(diff) {
+		t.Fatalf("diff has body changes for reordered equal maps:\n%s", diff)
+	}
+}
+
+func TestGetValuesWithAllValuesKeepsComputedWhenUserValuesReadFails(t *testing.T) {
+	rel := helmTestRelease("values-demo", "demo", 1, release.StatusDeployed, "deployed")
+	rel.Chart = &chart.Chart{
+		Metadata: &chart.Metadata{Name: "values-demo"},
+		Values: map[string]any{
+			"replicaCount": 1,
+			"image": map[string]any{
+				"repository": "example/app",
+				"tag":        "default",
+			},
+		},
+	}
+	rel.Config = map[string]any{
+		"image": map[string]any{
+			"tag": "2.0.0",
+		},
+	}
+	driver := &failSecondReadDriver{inner: storagedriver.NewMemory()}
+	actionConfig := &action.Configuration{
+		KubeClient: &kubefake.PrintingKubeClient{Out: io.Discard},
+		Releases:   helmstorage.Init(driver),
+	}
+	if err := actionConfig.Releases.Create(rel); err != nil {
+		t.Fatal(err)
+	}
+
+	values, err := getValuesWith(actionConfig, rel.Name, true, rel.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if values.Computed == nil {
+		t.Fatal("Computed = nil, want computed values from successful all-values read")
+	}
+	if got := values.Computed["replicaCount"]; got != 1 {
+		t.Fatalf("Computed[replicaCount] = %#v, want 1", got)
+	}
+	image, ok := values.Computed["image"].(map[string]any)
+	if !ok {
+		t.Fatalf("Computed[image] = %#v, want map", values.Computed["image"])
+	}
+	if got := image["tag"]; got != "2.0.0" {
+		t.Fatalf("Computed[image][tag] = %#v, want user override", got)
+	}
+	if len(values.UserSupplied) != 0 {
+		t.Fatalf("UserSupplied = %#v, want empty when secondary read fails", values.UserSupplied)
+	}
+}
+
+func TestDiffResourceRefs(t *testing.T) {
+	left := []ResourceRef{
+		{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "demo", Name: "cart"},
+		{APIVersion: "v1", Kind: "Service", Namespace: "demo", Name: "cart"},
+	}
+	right := []ResourceRef{
+		{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "demo", Name: "cart"},
+		{APIVersion: "v1", Kind: "ConfigMap", Namespace: "demo", Name: "cart-config"},
+	}
+
+	removed, added, unchanged := diffResourceRefs(left, right)
+
+	if len(removed) != 1 || removed[0].Kind != "Service" {
+		t.Fatalf("removed = %#v, want Service", removed)
+	}
+	if len(added) != 1 || added[0].Kind != "ConfigMap" {
+		t.Fatalf("added = %#v, want ConfigMap", added)
+	}
+	if len(unchanged) != 1 || unchanged[0].Kind != "Deployment" {
+		t.Fatalf("unchanged = %#v, want Deployment", unchanged)
+	}
+}
+
+type failSecondReadDriver struct {
+	inner *storagedriver.Memory
+	reads int
+}
+
+func (d *failSecondReadDriver) Name() string {
+	return d.inner.Name()
+}
+
+func (d *failSecondReadDriver) Create(key string, rls *release.Release) error {
+	return d.inner.Create(key, rls)
+}
+
+func (d *failSecondReadDriver) Update(key string, rls *release.Release) error {
+	return d.inner.Update(key, rls)
+}
+
+func (d *failSecondReadDriver) Delete(key string) (*release.Release, error) {
+	return d.inner.Delete(key)
+}
+
+func (d *failSecondReadDriver) Get(key string) (*release.Release, error) {
+	d.reads++
+	if d.reads > 1 {
+		return nil, fmt.Errorf("forced second read failure")
+	}
+	return d.inner.Get(key)
+}
+
+func (d *failSecondReadDriver) List(filter func(*release.Release) bool) ([]*release.Release, error) {
+	return d.inner.List(filter)
+}
+
+func (d *failSecondReadDriver) Query(labels map[string]string) ([]*release.Release, error) {
+	return d.inner.Query(labels)
+}
+
+func TestNonNilResourceRefs(t *testing.T) {
+	refs := nonNilResourceRefs(nil)
+	if refs == nil {
+		t.Fatal("nonNilResourceRefs(nil) returned nil")
+	}
+}
+
+func TestExtractHookDiagnosticsSurfacesFailedHookDeletePolicy(t *testing.T) {
+	rel := helmTestRelease("hooks", "demo", 2, release.StatusFailed, `Upgrade "hooks" failed: hook failed`)
+	rel.Hooks = []*release.Hook{
+		{
+			Name:           "hooks-pre-upgrade",
+			Kind:           "Job",
+			Path:           "templates/hook.yaml",
+			Events:         []release.HookEvent{release.HookPreUpgrade},
+			DeletePolicies: []release.HookDeletePolicy{release.HookFailed},
+			LastRun: release.HookExecution{
+				Phase:       release.HookPhaseFailed,
+				StartedAt:   helmtime.Unix(10, 0),
+				CompletedAt: helmtime.Unix(11, 0),
+			},
+		},
+	}
+
+	hooks := extractHooks(rel)
+	diagnostics := extractHookDiagnostics(hooks)
+
+	if len(hooks) != 1 {
+		t.Fatalf("len(hooks) = %d, want 1", len(hooks))
+	}
+	if hooks[0].Path != "templates/hook.yaml" || hooks[0].Status != "Failed" {
+		t.Fatalf("hook metadata = %#v", hooks[0])
+	}
+	if hooks[0].StartedAt == nil || hooks[0].CompletedAt == nil {
+		t.Fatalf("hook times = started %v completed %v, want non-nil", hooks[0].StartedAt, hooks[0].CompletedAt)
+	}
+	if len(diagnostics) != 1 {
+		t.Fatalf("len(diagnostics) = %d, want 1", len(diagnostics))
+	}
+	if !diagnostics[0].EvidenceUnavailable || !strings.Contains(diagnostics[0].EvidenceUnavailableReason, "hook-failed") {
+		t.Fatalf("diagnostic = %#v, want delete-policy evidence warning", diagnostics[0])
+	}
+}
+
+func TestExtractHooksOmitsZeroTimes(t *testing.T) {
+	rel := helmTestRelease("hooks", "demo", 2, release.StatusPendingUpgrade, "Running hook")
+	rel.Hooks = []*release.Hook{
+		{
+			Name:   "hooks-pre-upgrade",
+			Kind:   "Job",
+			Events: []release.HookEvent{release.HookPreUpgrade},
+			LastRun: release.HookExecution{
+				Phase: release.HookPhaseRunning,
+			},
+		},
+	}
+
+	hooks := extractHooks(rel)
+	if len(hooks) != 1 {
+		t.Fatalf("len(hooks) = %d, want 1", len(hooks))
+	}
+	if hooks[0].StartedAt != nil || hooks[0].CompletedAt != nil {
+		t.Fatalf("hook times = started %v completed %v, want nil zero times", hooks[0].StartedAt, hooks[0].CompletedAt)
+	}
+}
+
+func TestEnrichHookDiagnosticsWithClusterEvidenceCorrelatesJobPodsEvents(t *testing.T) {
+	rel := helmTestRelease("hooks", "demo", 2, release.StatusFailed, `Upgrade "hooks" failed: hook failed`)
+	rel.Hooks = []*release.Hook{
+		{
+			Name:   "hooks-pre-upgrade",
+			Kind:   "Job",
+			Events: []release.HookEvent{release.HookPreUpgrade},
+			Manifest: `apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hooks-pre-upgrade
+  namespace: demo-hooks
+`,
+			LastRun: release.HookExecution{
+				Phase:       release.HookPhaseFailed,
+				StartedAt:   helmtime.Unix(10, 0),
+				CompletedAt: helmtime.Unix(11, 0),
+			},
+		},
+	}
+	hooks := extractHooks(rel)
+	detail := &HelmReleaseDetail{
+		Name:            rel.Name,
+		Namespace:       rel.Namespace,
+		Hooks:           hooks,
+		HookDiagnostics: extractHookDiagnostics(hooks),
+	}
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "hooks-pre-upgrade", Namespace: "demo-hooks"},
+		Status: batchv1.JobStatus{
+			Failed: 1,
+			Conditions: []batchv1.JobCondition{{
+				Type:    batchv1.JobFailed,
+				Status:  corev1.ConditionTrue,
+				Reason:  "BackoffLimitExceeded",
+				Message: "migration failed password=supersecret",
+			}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "hooks-pre-upgrade-abcde",
+			Namespace: "demo-hooks",
+			Labels:    map[string]string{"job-name": "hooks-pre-upgrade"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "migrate"}}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "migrate",
+				Ready: false,
+				State: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 1,
+						Reason:   "Error",
+						Message:  "migration failed password=supersecret",
+					},
+				},
+			}},
+		},
+	}
+	event := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Name: "hook-event", Namespace: "demo-hooks"},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:      "Pod",
+			Namespace: "demo-hooks",
+			Name:      "hooks-pre-upgrade-abcde",
+		},
+		Type:          corev1.EventTypeWarning,
+		Reason:        "BackOff",
+		Message:       "Back-off restarting failed container password=supersecret",
+		Count:         2,
+		LastTimestamp: metav1.NewTime(time.Unix(20, 0)),
+	}
+	client := fake.NewSimpleClientset(job, pod, event)
+
+	EnrichHookDiagnosticsWithClusterEvidence(context.Background(), detail, client)
+
+	if len(detail.HookDiagnostics) != 1 {
+		t.Fatalf("len(HookDiagnostics) = %d, want 1", len(detail.HookDiagnostics))
+	}
+	diag := detail.HookDiagnostics[0]
+	if diag.Namespace != "demo-hooks" {
+		t.Fatalf("diagnostic namespace = %q, want demo-hooks", diag.Namespace)
+	}
+	if diag.EvidenceUnavailable {
+		t.Fatalf("EvidenceUnavailable = true, reason %q", diag.EvidenceUnavailableReason)
+	}
+	if diag.Evidence == nil {
+		t.Fatal("Evidence = nil")
+	}
+	if len(diag.Evidence.Jobs) != 1 || diag.Evidence.Jobs[0].Status != "failed" {
+		t.Fatalf("jobs = %#v, want failed job evidence", diag.Evidence.Jobs)
+	}
+	if len(diag.Evidence.Pods) != 1 || diag.Evidence.Pods[0].Reason != "Error" {
+		t.Fatalf("pods = %#v, want pod error evidence", diag.Evidence.Pods)
+	}
+	if strings.Contains(diag.Evidence.Pods[0].Message, "supersecret") {
+		t.Fatalf("pod message was not redacted: %q", diag.Evidence.Pods[0].Message)
+	}
+	if len(diag.Evidence.Events) != 1 || diag.Evidence.Events[0].Reason != "BackOff" {
+		t.Fatalf("events = %#v, want BackOff evidence", diag.Evidence.Events)
+	}
+	if strings.Contains(diag.Evidence.Events[0].Message, "supersecret") {
+		t.Fatalf("event message was not redacted: %q", diag.Evidence.Events[0].Message)
+	}
+	if diag.Evidence.Summary == "" {
+		t.Fatal("Evidence summary is empty")
+	}
+}
+
+func TestEnrichHookDiagnosticsPrefersReadErrorOverDeletePolicyHint(t *testing.T) {
+	hooks := []HelmHook{{
+		Name:           "hooks-pre-upgrade",
+		Namespace:      "demo-hooks",
+		Kind:           "Job",
+		Events:         []string{"pre-upgrade"},
+		Status:         "Failed",
+		DeletePolicies: []string{"before-hook-creation"},
+	}}
+	detail := &HelmReleaseDetail{
+		Name:            "hooks",
+		Namespace:       "demo-hooks",
+		Hooks:           hooks,
+		HookDiagnostics: extractHookDiagnostics(hooks),
+	}
+	client := fake.NewSimpleClientset()
+	client.Fake.PrependReactor("get", "jobs", func(action ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "batch", Resource: "jobs"}, "hooks-pre-upgrade", fmt.Errorf("denied"))
+	})
+
+	EnrichHookDiagnosticsWithClusterEvidence(context.Background(), detail, client)
+
+	if len(detail.HookDiagnostics) != 1 {
+		t.Fatalf("len(HookDiagnostics) = %d, want 1", len(detail.HookDiagnostics))
+	}
+	diag := detail.HookDiagnostics[0]
+	if !diag.EvidenceUnavailable {
+		t.Fatal("EvidenceUnavailable = false, want true")
+	}
+	if !strings.Contains(diag.EvidenceUnavailableReason, "current Kubernetes identity") {
+		t.Fatalf("EvidenceUnavailableReason = %q, want RBAC/read error", diag.EvidenceUnavailableReason)
+	}
+	if diag.Evidence == nil || len(diag.Evidence.Errors) == 0 {
+		t.Fatalf("Evidence errors = %#v, want read error evidence", diag.Evidence)
+	}
+}
+
+func TestEnrichHookDiagnosticsDoesNotTreatEventsOnlyErrorAsPrimaryRBAC(t *testing.T) {
+	hooks := []HelmHook{{
+		Name:      "hooks-pre-upgrade",
+		Namespace: "demo-hooks",
+		Kind:      "Job",
+		Events:    []string{"pre-upgrade"},
+		Status:    "Failed",
+	}}
+	detail := &HelmReleaseDetail{
+		Name:            "hooks",
+		Namespace:       "demo-hooks",
+		Hooks:           hooks,
+		HookDiagnostics: extractHookDiagnostics(hooks),
+	}
+	client := fake.NewSimpleClientset()
+	client.Fake.PrependReactor("list", "events", func(action ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "events"}, "", fmt.Errorf("denied"))
+	})
+
+	EnrichHookDiagnosticsWithClusterEvidence(context.Background(), detail, client)
+
+	if len(detail.HookDiagnostics) != 1 {
+		t.Fatalf("len(HookDiagnostics) = %d, want 1", len(detail.HookDiagnostics))
+	}
+	diag := detail.HookDiagnostics[0]
+	if !diag.EvidenceUnavailable {
+		t.Fatal("EvidenceUnavailable = false, want true")
+	}
+	if !strings.Contains(diag.EvidenceUnavailableReason, "No live Job/Pod evidence") {
+		t.Fatalf("EvidenceUnavailableReason = %q, want no-live-evidence reason", diag.EvidenceUnavailableReason)
+	}
+	if diag.Evidence == nil || len(diag.Evidence.Errors) == 0 || !strings.HasPrefix(diag.Evidence.Errors[0], "events:") {
+		t.Fatalf("Evidence errors = %#v, want event read error retained", diag.Evidence)
+	}
+}
+
+func TestListHookEventsPrioritizesWarningsBeforeNormalBackfill(t *testing.T) {
+	namespace := "demo-hooks"
+	podName := "hooks-pre-upgrade-abcde"
+	objs := make([]runtime.Object, 0, maxHookEvidenceEvents+1)
+	for i := range maxHookEvidenceEvents {
+		objs = append(objs, &corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("normal-%d", i), Namespace: namespace},
+			InvolvedObject: corev1.ObjectReference{
+				Kind:      "Pod",
+				Namespace: namespace,
+				Name:      podName,
+			},
+			Type:          corev1.EventTypeNormal,
+			Reason:        fmt.Sprintf("Normal%d", i),
+			Message:       "normal lifecycle event",
+			LastTimestamp: metav1.NewTime(time.Unix(100+int64(i), 0)),
+		})
+	}
+	objs = append(objs, &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Name: "warning", Namespace: namespace},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:      "Pod",
+			Namespace: namespace,
+			Name:      podName,
+		},
+		Type:          corev1.EventTypeWarning,
+		Reason:        "BackoffLimitExceeded",
+		Message:       "job failed",
+		LastTimestamp: metav1.NewTime(time.Unix(1, 0)),
+	})
+	client := fake.NewSimpleClientset(objs...)
+
+	events, errText := listHookEvents(context.Background(), client, namespace, []hookObjectRef{{kind: "Pod", name: podName}})
+
+	if errText != "" {
+		t.Fatalf("errText = %q, want empty", errText)
+	}
+	if len(events) != maxHookEvidenceEvents {
+		t.Fatalf("len(events) = %d, want %d", len(events), maxHookEvidenceEvents)
+	}
+	if events[0].Type != corev1.EventTypeWarning || events[0].Reason != "BackoffLimitExceeded" {
+		t.Fatalf("first event = %#v, want warning before normal backfill", events[0])
+	}
+	for _, event := range events {
+		if event.Reason == "Normal0" {
+			t.Fatalf("oldest normal event was retained; events = %#v", events)
+		}
+	}
+}
+
+func TestEnrichHookDiagnosticsMarksUnavailableWhenClientMissing(t *testing.T) {
+	hooks := []HelmHook{{
+		Name:           "hooks-pre-upgrade",
+		Namespace:      "demo-hooks",
+		Kind:           "Job",
+		Events:         []string{"pre-upgrade"},
+		Status:         "Failed",
+		DeletePolicies: []string{"before-hook-creation"},
+	}}
+	detail := &HelmReleaseDetail{
+		Name:            "hooks",
+		Namespace:       "demo-hooks",
+		Hooks:           hooks,
+		HookDiagnostics: extractHookDiagnostics(hooks),
+	}
+
+	EnrichHookDiagnosticsWithClusterEvidence(context.Background(), detail, nil)
+
+	if len(detail.HookDiagnostics) != 1 {
+		t.Fatalf("len(HookDiagnostics) = %d, want 1", len(detail.HookDiagnostics))
+	}
+	diag := detail.HookDiagnostics[0]
+	if !diag.EvidenceUnavailable {
+		t.Fatal("EvidenceUnavailable = false, want true")
+	}
+	if !strings.Contains(diag.EvidenceUnavailableReason, "no Kubernetes client") {
+		t.Fatalf("EvidenceUnavailableReason = %q, want missing client reason", diag.EvidenceUnavailableReason)
+	}
+}
+
+func diffHasBodyChange(diff string) bool {
+	for _, line := range strings.Split(diff, "\n") {
+		if line == "" || strings.HasPrefix(line, "---") || strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "@@") {
+			continue
+		}
+		if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+			return true
+		}
+	}
+	return false
 }
 
 func assertStorageNamespaceFromSecret(t *testing.T, gzipped bool) {
