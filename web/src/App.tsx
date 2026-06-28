@@ -133,12 +133,12 @@ function AuthBarrier({ authMode }: { authMode: string }) {
   if (authMode === 'oidc') {
     return (
       <div className="flex-1 relative bg-theme-base">
-        <div className="fixed inset-0 pointer-events-none">
+        <div className="absolute inset-0 pointer-events-none">
           <img
             src={radarLoadingIcon}
             alt=""
             aria-hidden
-            // Integer offset (vw/2 − 22) — matches the Connecting/Opening splashes;
+            // Integer offset (50% − 22) — matches the Connecting/Opening splashes;
             // avoids sub-pixel jitter from translate(-50%) on odd-width viewports.
             className="absolute w-11 h-11"
             style={{ left: 'calc(50% - 22px)', top: 'calc(50% - 22px)' }}
@@ -182,7 +182,7 @@ function AuthBarrier({ authMode }: { authMode: string }) {
 // detail to list would otherwise leave the peek orphaned. Only `app` is included
 // (not the whole query) so filter/tab/namespace churn doesn't close the peek.
 function peekOwnerKey(pathname: string, search: string): string {
-  return `${pathname} ${new URLSearchParams(search).get('app') ?? ''}`
+  return `${pathname}\n${new URLSearchParams(search).get('app') ?? ''}`
 }
 
 function AppInner() {
@@ -723,6 +723,16 @@ function AppInner() {
 
   // Connection state (for graceful startup)
   const { connection, retry: retryConnection, isRetrying, updateFromSSE: updateConnectionFromSSE } = useConnection()
+
+  // The app's content surface is ready to show: auth resolved, not mid context-
+  // switch, and the cluster connection is live. The main content area gates on
+  // exactly this, and so do the overlay drawers — otherwise a deep-link/refresh
+  // with `?resource=`/`?release=` renders the drawer on top of the connecting/
+  // switching splash, pushing the centered loading logo off-center and showing an
+  // empty drawer over a not-yet-loaded view. Gating both on the SAME readiness so
+  // a drawer only ever sits over a real content surface.
+  const contentReady = !isSwitching && !authMePending &&
+    !(authMe?.authEnabled && !authMe?.username) && connection.state === 'connected'
 
   // Query client for cache invalidation
   const queryClient = useQueryClient()
@@ -1579,20 +1589,20 @@ function AppInner() {
       )}
 
       {/* Connecting view — shown during initial connection or retry.
-          Icon is viewport-anchored so its screen position matches the
+          Icon is pane-anchored so its screen position matches the
           host hub splash across cross-document transitions. */}
       {!isSwitching && !(authMe?.authEnabled && !authMe?.username) && connection.state === 'connecting' && (
         <div className="flex-1 relative bg-theme-base">
-          {/* Icon absolutely anchored to viewport-center. The label block
+          {/* Icon absolutely anchored to the pane center. The label block
               sits at a fixed offset below — independent of label height
               so multi-line messages (context + progress) don't shift the
               icon's screen position. */}
-          <div className="fixed inset-0 pointer-events-none">
+          <div className="absolute inset-0 pointer-events-none">
             <img
               src={radarLoadingIcon}
               alt=""
               aria-hidden
-              // Integer offset (vw/2 − 22) — avoids sub-pixel jitter from
+              // Integer offset (50% − 22) — avoids sub-pixel jitter from
               // `translate(-50%, -50%)` on odd-width viewports.
               className="absolute w-11 h-11"
               style={{ left: 'calc(50% - 22px)', top: 'calc(50% - 22px)' }}
@@ -1620,15 +1630,15 @@ function AppInner() {
         </div>
       )}
 
-      {/* Context switching overlay — icon viewport-anchored, label below. */}
+      {/* Context switching overlay — icon pane-anchored, label below. */}
       {isSwitching && (
         <div className="flex-1 relative bg-theme-base">
-          <div className="fixed inset-0 pointer-events-none">
+          <div className="absolute inset-0 pointer-events-none">
             <img
               src={radarLoadingIcon}
               alt=""
               aria-hidden
-              // Integer offset (vw/2 − 22) — avoids sub-pixel jitter from
+              // Integer offset (50% − 22) — avoids sub-pixel jitter from
               // `translate(-50%, -50%)` on odd-width viewports.
               className="absolute w-11 h-11"
               style={{ left: 'calc(50% - 22px)', top: 'calc(50% - 22px)' }}
@@ -1674,7 +1684,7 @@ function AppInner() {
       )}
 
       {/* Main content - only show when connected and authenticated */}
-      {!isSwitching && !authMePending && !(authMe?.authEnabled && !authMe?.username) && connection.state === 'connected' && <div className="flex-1 flex overflow-hidden">
+      {contentReady && <div className="flex-1 flex overflow-hidden">
         <ErrorBoundary>
         {/* Home dashboard */}
         {mainView === 'home' && (
@@ -1926,7 +1936,7 @@ function AppInner() {
           <div className="flex-1 relative bg-theme-base">
             {/* Viewport-anchored, 17px — identical to the "Connecting" splash so
                 the mark doesn't move or resize across the takeover hand-off. */}
-            <div className="fixed inset-0 pointer-events-none">
+            <div className="absolute inset-0 pointer-events-none">
               <img
                 src={radarLoadingIcon}
                 alt=""
@@ -1982,8 +1992,10 @@ function AppInner() {
         </ErrorBoundary>
       </div>}
 
-      {/* Resource detail drawer — stays mounted, expands to full-screen WorkloadView */}
-      {resourceDrawer.shouldRender && drawerResource && (
+      {/* Resource detail drawer — stays mounted, expands to full-screen WorkloadView.
+          Gated on contentReady so it never renders over the connecting/switching
+          splash (which would push the centered logo off-center). */}
+      {contentReady && resourceDrawer.shouldRender && drawerResource && (
         <ResourceDetailDrawer
           resource={drawerResource}
           initialTab={drawerInitialTab}
@@ -2007,8 +2019,8 @@ function AppInner() {
         />
       )}
 
-      {/* Helm release drawer */}
-      {helmDrawer.shouldRender && drawerHelmRelease && (
+      {/* Helm release drawer — same contentReady gate as the resource drawer. */}
+      {contentReady && helmDrawer.shouldRender && drawerHelmRelease && (
         <HelmReleaseDrawer
           release={drawerHelmRelease}
           isOpen={helmDrawer.isOpen}
