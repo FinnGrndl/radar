@@ -48,7 +48,7 @@ import { useEventSource } from './hooks/useEventSource'
 import { debugNamespaceLog, useNamespaces, useNamespaceScope, useSetActiveNamespace, useSwitchContext, useAuthMe, useAudit } from './api/client'
 import { buildAuditSeverityMap } from './utils/auditBadges'
 import { routePath, apiUrl, getAuthHeaders, getCredentialsMode } from './api/config'
-import { KeyboardShortcutProvider, useRegisterShortcut, useRegisterShortcuts } from './hooks/useKeyboardShortcuts'
+import { KeyboardShortcutProvider, useRegisterShortcut, useRegisterShortcuts, useSuppressBaseShortcuts } from './hooks/useKeyboardShortcuts'
 import { useAnimatedUnmount } from './hooks/useAnimatedUnmount'
 import { useDocumentTitle } from './hooks/useDocumentTitle'
 import radarLoadingIcon from '@skyhook-io/k8s-ui/assets/radar/radar-icon-loading.svg'
@@ -460,11 +460,16 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
   // Diagnostics overlay state
   const [showDiagnostics, setShowDiagnostics] = useState(false)
 
-  // Drawer expanded state (drawer grows to full width and renders WorkloadView)
-  const [drawerExpanded, setDrawerExpanded] = useState(false)
+  // The peek drawer "expanded" into a fullscreen overlay = ?full=1 with a selected
+  // resource, on ANY view (resources list, topology graph, GitOps, Applications…) —
+  // the underlying view stays mounted. URL-derived so Back/Forward/refresh behave
+  // (non-list peeks aren't URL-backed, so refresh drops the overlay gracefully).
+  // Used by the routing effects below; the render uses `expandedView` (gated on what
+  // actually renders) — see further down.
+  const drawerExpanded = !!selectedResource && searchParams.get('full') === '1'
 
-  // Suppress the mainView-change clear effect during controlled expand/collapse transitions.
-  const suppressViewClearRef = useRef(false)
+  // On mobile there's no room for the side drawer — a resource detail is always full-screen.
+  const isMobile = useMediaQuery('(max-width: 639px)')
 
   // On a history Pop (back/forward) the URL is authoritative. The URL-write
   // effect, running with not-yet-synced state, would otherwise write the stale
@@ -497,9 +502,9 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
   // URL backing, so the only signal that the page beneath it has navigated is
   // that its owner-key (pathname + ?app) no longer matches where it was opened.
   // Hiding it here, at render time, closes the orphan on Back without adding
-  // another clearing effect that would race the `suppressViewClearRef` lifecycle.
-  // The /resources case is URL-backed and handled above; an expanded drawer
-  // (drawerExpanded) legitimately lives at /workload and must stay open there.
+  // another clearing effect. The /resources case is URL-backed and handled above;
+  // an expanded drawer (drawerExpanded) only exists on /resources (?full=1), so it
+  // is excluded here and never treated as an orphan.
   const peekRouteOrphaned = !!selectedResource && !drawerExpanded && mainView !== 'resources' &&
     peekOwnerKeyRef.current !== null &&
     peekOwnerKeyRef.current !== peekOwnerKey(location.pathname, location.search)
@@ -526,7 +531,6 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
 
     if (prev !== null && prev !== key && selectedResourceRouteMismatch) {
       setSelectedResource(null)
-      setDrawerExpanded(false)
     }
   }, [mainView, currentResourceKindSlug, currentResourceGroup, selectedResourceRouteMismatch])
 
@@ -541,6 +545,19 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
   const lastResourceRef = useRef(routeSelectedResource)
   if (routeSelectedResource) lastResourceRef.current = routeSelectedResource
   const drawerResource = routeSelectedResource || lastResourceRef.current
+
+  // Effective fullscreen state — keyed off the resource that's ACTUALLY rendering
+  // (routeSelectedResource), not the raw selection, so an orphaned/mismatched peek
+  // can't inert the shell with no visible drawer. ?full=1 on any view, or forced on
+  // mobile (no room for a side drawer). Drives the inert backdrop + shortcut suppression.
+  const expandedView = !!routeSelectedResource && (searchParams.get('full') === '1' || isMobile)
+  useSuppressBaseShortcuts(expandedView)
+  // Held value for the drawer's `expanded` prop so closing an expanded drawer slides
+  // it out at full size instead of running a collapse morph mid-dismiss. Tracks the
+  // live state while a resource is selected; frozen during the slide-out.
+  const lastExpandedRef = useRef(expandedView)
+  if (routeSelectedResource) lastExpandedRef.current = expandedView
+  const drawerExpandedProp = routeSelectedResource ? expandedView : lastExpandedRef.current
 
   const lastHelmReleaseRef = useRef(selectedHelmRelease)
   if (selectedHelmRelease) lastHelmReleaseRef.current = selectedHelmRelease
@@ -580,6 +597,10 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
     newParams.delete('kind')
     newParams.delete('mode')
     newParams.delete('group')
+    // Open as a normal drawer — never inherit a stale ?full=1/tab from an
+    // expanded view we're navigating away from (only expand/drill set those).
+    newParams.delete('full')
+    newParams.delete('tab')
     newParams.set('resource', resource.namespace ? `${resource.namespace}/${resource.name}` : resource.name)
     if (resource.group) {
       newParams.set('apiGroup', resource.group)
@@ -627,12 +648,33 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
     navigateToResourceList(resource)
   }, [navigate, navigateToHelmRelease, navigateToResourceList])
 
-  // Collapse from expanded WorkloadView back to drawer
+  // Collapse the over-list fullscreen back to the drawer = drop ?full=1 (and the
+  // resource-scoped ?tab) in place. The button means "collapse THIS to a drawer"
+  // regardless of how we got here (expand, deep link, or a drill trail), so it
+  // scrubs rather than walking history — `navigate(-1)` would leave the app on a
+  // deep link, or step back to the previous resource after a drill. Browser Back
+  // keeps its own natural history walk (it pops the ?full=1 entry → collapse).
   const handleCollapseFromExpanded = useCallback(() => {
-    suppressViewClearRef.current = true
-    setDrawerExpanded(false)
-    navigate(-1)
-  }, [navigate])
+    const p = new URLSearchParams(searchParams)
+    p.delete('full')
+    p.delete('tab')
+    setSearchParams(p, { replace: true })
+  }, [searchParams, setSearchParams])
+
+  // Close the peek and drop any expand flags. Outside /resources the drawer isn't
+  // URL-backed, so a lingering ?full=1/tab would make the next peek reopen
+  // fullscreen instead of as a side drawer. (On /resources, ResourcesView's own
+  // updateURL also scrubs these — deleting them here too is idempotent.)
+  const closeDrawer = useCallback(() => {
+    setSelectedResource(null)
+    setDrawerInitialTab('detail')
+    if (searchParams.has('full') || searchParams.has('tab')) {
+      const p = new URLSearchParams(searchParams)
+      p.delete('full')
+      p.delete('tab')
+      setSearchParams(p, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
 
   // Theme toggle for keyboard shortcut
   const { toggleTheme } = useTheme()
@@ -918,8 +960,8 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
       slowInvalidationRef.current = { updatedKinds: new Set(), timer: null }
 
       // Close any open drawers/overlays — old cluster's resources don't exist on the new one
+      // (?full=1 is cleared by the URL reset below).
       setSelectedResource(null)
-      setDrawerExpanded(false)
       setSelectedHelmRelease(null)
 
       // Reset URL to current view with no resource-specific params.
@@ -1284,13 +1326,6 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
   // But preserve selectedResource when navigating TO resources view (e.g., from Helm deep link)
   const prevMainView = useRef(mainView)
   useEffect(() => {
-    // Skip clearing during controlled expand/collapse transitions
-    if (suppressViewClearRef.current) {
-      suppressViewClearRef.current = false
-      prevMainView.current = mainView
-      return
-    }
-
     const navigatingToResources = mainView === 'resources' && prevMainView.current !== 'resources'
     const navigatingToHelm = mainView === 'helm' && prevMainView.current !== 'helm'
     prevMainView.current = mainView
@@ -1301,6 +1336,8 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
     // asserts. (On a real view switch the URL no longer carries the param, so
     // the clear proceeds.) Without this, deep-linking straight to a Helm
     // release lands on the release list with no drawer.
+    // (drawerExpanded is URL-derived from ?full=1, so leaving /resources drops it
+    // automatically — no explicit reset needed.)
     const params = new URLSearchParams(window.location.search)
     if (!navigatingToResources && !params.has('resource')) {
       setSelectedResource(null)
@@ -1308,7 +1345,6 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
     if (!navigatingToHelm && !params.has('release')) {
       setSelectedHelmRelease(null)
     }
-    setDrawerExpanded(false)
   }, [mainView])
 
   // Clear resource selection when namespaces change — but keep a selection the
@@ -1318,7 +1354,6 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
     const params = new URLSearchParams(window.location.search)
     if (!params.has('resource')) setSelectedResource(null)
     if (!params.has('release')) setSelectedHelmRelease(null)
-    setDrawerExpanded(false)
   }, [namespacesKey])
 
   // Filter topology based on visible kinds (uses displayedTopology which respects pause)
@@ -1581,6 +1616,8 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
                 params.delete('kind')
                 if (group) params.set('apiGroup', group); else params.delete('apiGroup')
                 params.delete('resource')
+                params.delete('full')
+                params.delete('tab')
                 navigate({ pathname: `/resources/${kind}`, search: params.toString() })
               }}
               onSwitchContext={(name) => switchContext.mutate({ name }, { onSettled: () => setNamespaces([]) })}
@@ -1791,7 +1828,10 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
       )}
 
       {/* Main content - only show when connected and authenticated */}
-      {contentReady && <div className="flex-1 flex overflow-hidden">
+      {/* inert while a fullscreen detail overlay covers the views — keeps the
+          retained background list out of the focus order + a11y tree (the visual
+          cover already blocks pointer events). */}
+      {contentReady && <div className="flex-1 flex overflow-hidden" inert={expandedView}>
         <ErrorBoundary>
         {/* Home dashboard */}
         {mainView === 'home' && (
@@ -1806,6 +1846,8 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
               newParams.delete('kind') // kind is now in the path
               newParams.delete('mode')
               newParams.delete('resource')
+              newParams.delete('full') // don't carry an expanded-overlay flag onto a fresh kind list
+              newParams.delete('tab')
               newParams.delete('group') // Clear topology grouping param to avoid leaking into resources view
               if (apiGroup) {
                 newParams.set('apiGroup', apiGroup)
@@ -2074,8 +2116,10 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
           />
         )}
 
-        {/* Workload full view (direct URL only — expand from drawer uses drawer's expanded state) */}
-        {mainView === 'workload' && !drawerExpanded && (
+        {/* Workload full view — the standalone fullscreen route for non-list
+            surfaces and deep links. Expand-from-drawer is the ?full=1 overlay on
+            /resources instead, so it never routes here. */}
+        {mainView === 'workload' && (
           <WorkloadViewRoute
             onNavigateToResource={(resource) => {
               navigate(buildWorkloadPath(resource))
@@ -2100,18 +2144,37 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
           // to the top of the content area instead of leaving a 49px gap.
           headerHeight={chromeless ? 0 : undefined}
           isOpen={resourceDrawer.isOpen}
-          expanded={drawerExpanded}
-          onClose={() => { setSelectedResource(null); setDrawerInitialTab('detail'); setDrawerExpanded(false) }}
+          expanded={drawerExpandedProp}
+          onClose={closeDrawer}
           onNavigate={(res) => navigateToResource(res)}
-          onExpand={(res) => {
-            suppressViewClearRef.current = true
-            setDrawerExpanded(true)
-            navigate(buildWorkloadPath(res))
+          canCollapseToDrawer={!isMobile}
+          onExpand={(_res, opts) => {
+            // Grow the peek into a fullscreen overlay (?full=1, pushed so Back
+            // collapses) over whatever view is underneath — list, topology graph,
+            // GitOps, Applications — which stays mounted. Carry the YAML tab when
+            // expanding from the drawer's YAML view so the editor (and its
+            // session-persisted draft) is right there, not behind the Overview tab.
+            const p = new URLSearchParams(searchParams)
+            p.set('full', '1')
+            if (opts?.yaml) p.set('tab', 'yaml')
+            setSearchParams(p)
           }}
-          onCollapse={handleCollapseFromExpanded}
+          // On mobile there's no drawer to collapse back to, so the collapse/back
+          // control closes the resource (returns to the list) instead.
+          onCollapse={isMobile ? closeDrawer : handleCollapseFromExpanded}
           onNavigateToResource={(resource) => {
-            setSelectedResource(resource)
-            navigate(buildWorkloadPath(resource), { replace: true })
+            // Drill into a related resource while expanded: stay in the over-list
+            // overlay for the new resource (pushed, so Back walks resource→resource
+            // still expanded). The backdrop list follows to the new kind.
+            const pluralKind = kindToPlural(resource.kind)
+            setSelectedResource({ ...resource, kind: pluralKind })
+            const p = new URLSearchParams()
+            const ns = searchParams.get('namespaces')
+            if (ns) p.set('namespaces', ns)
+            p.set('resource', resource.namespace ? `${resource.namespace}/${resource.name}` : resource.name)
+            if (resource.group) p.set('apiGroup', resource.group)
+            p.set('full', '1')
+            navigate({ pathname: `/resources/${pluralKind}`, search: p.toString() })
           }}
         />
       )}
@@ -2174,6 +2237,8 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
             if (group) params.set('apiGroup', group)
             else params.delete('apiGroup')
             params.delete('resource')
+            params.delete('full')
+            params.delete('tab')
             navigate({ pathname: `/resources/${kind}`, search: params.toString() })
             // Focus the table search after navigation — the user came from ⌘K
             // (keyboard flow) and expects to type a resource name immediately.

@@ -71,10 +71,17 @@ interface WorkloadViewProps {
   onCollapseToDrawer?: () => void
   /** false = collapsed drawer mode, true (default) = full expanded mode */
   expanded?: boolean
+  /** false on the outgoing layer during an expand/collapse crossfade — suspend
+   *  keyboard shortcuts so the invisible layer doesn't capture them (default true) */
+  active?: boolean
   /** Close the drawer (collapsed mode) */
   onClose?: () => void
-  /** Expand from drawer to full view */
-  onExpand?: () => void
+  /** Expand from drawer to full view. `opts.yaml` true when expanding from the
+   *  drawer's YAML view so the full view opens on the YAML tab (edits carry over). */
+  onExpand?: (opts?: { yaml?: boolean }) => void
+  /** Hover/press the expand control = likely expand → pre-mount the full view. */
+  onExpandIntent?: () => void
+  onCancelExpandIntent?: () => void
   /** Initial view tab — 'yaml' opens YAML directly */
   initialTab?: 'detail' | 'yaml'
   /** API group for CRD resources */
@@ -248,8 +255,11 @@ export function WorkloadView({
   onNavigateToResource,
   onCollapseToDrawer,
   expanded = true,
+  active = true,
   onClose,
   onExpand,
+  onExpandIntent,
+  onCancelExpandIntent,
   initialTab,
   group,
   breadcrumb,
@@ -524,9 +534,12 @@ export function WorkloadView({
       keys: 'Escape',
       description: expanded ? 'Go back' : 'Close drawer',
       category: expanded ? 'Navigation' as const : 'Drawer' as const,
-      scope: expanded ? 'global' as const : 'drawer' as const,
+      // 'drawer' (top priority) in both modes so when this is the fullscreen
+      // overlay its Escape unambiguously wins over any background view's Escape
+      // (incl. another 'global'-scope WorkloadView mounted underneath).
+      scope: 'drawer' as const,
       handler: expanded ? onBack : () => onClose?.(),
-      enabled: true,
+      enabled: active,
     },
     {
       id: 'drawer-yaml',
@@ -535,7 +548,7 @@ export function WorkloadView({
       category: 'Drawer' as const,
       scope: 'drawer' as const,
       handler: () => switchView(true),
-      enabled: !expanded,
+      enabled: active && !expanded,
     },
     {
       id: 'drawer-detail',
@@ -544,9 +557,9 @@ export function WorkloadView({
       category: 'Drawer' as const,
       scope: 'drawer' as const,
       handler: () => switchView(false),
-      enabled: !expanded,
+      enabled: active && !expanded,
     },
-  ], [expanded, onBack, onClose, switchView]))
+  ], [active, expanded, onBack, onClose, switchView]))
 
   const status = getResourceStatus(apiKind, resource)
 
@@ -586,7 +599,12 @@ export function WorkloadView({
             <div className="flex items-center gap-1">
               {onExpand && (
                 <button
-                  onClick={onExpand}
+                  onClick={() => onExpand({ yaml: showYaml })}
+                  // Pre-mount the fullscreen view on hover/press so the click starts
+                  // the morph instantly (its heavy mount is already paid for).
+                  onPointerEnter={onExpandIntent}
+                  onPointerDown={onExpandIntent}
+                  onPointerLeave={onCancelExpandIntent}
                   className="p-1.5 text-theme-text-secondary hover:text-theme-text-primary hover:bg-theme-elevated rounded"
                   title="Open full view"
                 >
