@@ -124,10 +124,11 @@ func (s *Server) finalizePostContextSwitch() {
 	s.clearAllNamespacePreferences()
 }
 
-// loadSavedNamespacePreference seeds the per-user map on first reach. A
-// configured --namespaces list applies to both local and auth-enabled sessions
-// as the initial view. Without that, only local/no-auth sessions load the
-// persisted per-context pick from settings.json.
+// loadSavedNamespacePreference seeds the per-user map on first reach. Local
+// saved picks win over the configured --namespaces startup default so a
+// remembered narrower choice survives process restarts. Auth-enabled sessions
+// do not read local settings; for them --namespaces is the initial session
+// view.
 func (s *Server) loadSavedNamespacePreference(r *http.Request) {
 	ctxName := k8s.GetContextName()
 	if ctxName == "" {
@@ -141,19 +142,17 @@ func (s *Server) loadSavedNamespacePreference(r *http.Request) {
 	if _, ok := s.nsPreferences.Load(key); ok {
 		return
 	}
+	if username == "" {
+		saved := settings.Load()
+		if saved.ActiveNamespaces != nil {
+			if picks := saved.ActiveNamespaces[ctxName]; len(picks) > 0 {
+				s.nsPreferences.Store(key, append([]string(nil), picks...))
+				return
+			}
+		}
+	}
 	if len(s.configuredNamespaces) > 0 {
 		s.nsPreferences.Store(key, append([]string(nil), s.configuredNamespaces...))
-		return
-	}
-	if username != "" {
-		return // multi-user: no shared persisted pref
-	}
-	saved := settings.Load()
-	if saved.ActiveNamespaces == nil {
-		return
-	}
-	if picks := saved.ActiveNamespaces[ctxName]; len(picks) > 0 {
-		s.nsPreferences.Store(key, append([]string(nil), picks...))
 	}
 }
 

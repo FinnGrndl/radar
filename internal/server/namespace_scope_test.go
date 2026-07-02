@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/internal/settings"
 	pkgauth "github.com/skyhook-io/radar/pkg/auth"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -118,6 +119,25 @@ func TestLoadSavedNamespacePreference_ConfiguredNamespacesSeedOnce(t *testing.T)
 	s.loadSavedNamespacePreference(req)
 	if got := s.getActiveNamespaceForUser(req); len(got) != 0 {
 		t.Fatalf("configured namespace list re-seeded after clear: %v", got)
+	}
+}
+
+func TestLoadSavedNamespacePreference_LocalSavedPickWinsOverConfiguredNamespaces(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	s := newTestServer(t)
+	s.configuredNamespaces = []string{"team-a", "team-b"}
+	if _, err := settings.Update(func(st *settings.Settings) {
+		st.ActiveNamespaces = map[string][]string{"test-ctx": {"team-b"}}
+	}); err != nil {
+		t.Fatalf("settings.Update: %v", err)
+	}
+
+	req := reqAs("")
+	s.loadSavedNamespacePreference(req)
+	if got := s.getActiveNamespaceForUser(req); !slices.Equal(got, []string{"team-b"}) {
+		t.Fatalf("saved pick = %v, want [team-b]", got)
 	}
 }
 
