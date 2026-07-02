@@ -8,6 +8,7 @@ import (
 	"log"
 	"maps"
 	"net"
+	neturl "net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -322,13 +323,13 @@ func main() {
 
 	// Open browser — server is confirmed ready to accept connections
 	if !cfg.NoBrowser {
-		url := fmt.Sprintf("http://localhost:%d", cfg.Port)
+		targetURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
 		if len(cfg.Namespaces) > 0 {
-			url += fmt.Sprintf("?namespaces=%s", strings.Join(cfg.Namespaces, ","))
+			targetURL += "?namespaces=" + neturl.QueryEscape(strings.Join(cfg.Namespaces, ","))
 		} else if cfg.Namespace != "" {
-			url += fmt.Sprintf("?namespace=%s", cfg.Namespace)
+			targetURL += "?namespace=" + neturl.QueryEscape(cfg.Namespace)
 		}
-		go app.OpenBrowser(url, cfg.Browser)
+		go app.OpenBrowser(targetURL, cfg.Browser)
 	}
 
 	// Now initialize cluster connection and caches (browser will see progress via SSE)
