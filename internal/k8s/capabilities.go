@@ -61,14 +61,16 @@ type ResourcePermissions struct {
 //     any scope works; NamespaceScoped=true if at least one kind ended up
 //     namespace-scoped). Used by callers that just want a "can the user see
 //     anything?" answer.
-//   - Scopes: the per-kind authoritative map that drives informer wiring —
-//     some kinds may be cluster-wide while others are namespace-scoped on
-//     the same cluster, which the uniform view cannot express.
+//   - Scopes / ScopeNamespaces: the per-kind authoritative map that drives
+//     informer wiring — some kinds may be cluster-wide while others are
+//     namespace-scoped on the same cluster, and a namespace-scoped kind may
+//     be readable in several explicitly named namespaces.
 type PermissionCheckResult struct {
 	Perms           *ResourcePermissions
 	NamespaceScoped bool   // True if at least one resource type ended up namespace-scoped
 	Namespace       string // The fallback namespace used for namespace-scoped probes
 	Scopes          map[string]k8score.ResourceScope
+	ScopeNamespaces map[string][]string // Per-kind namespace-scoped informer fanout; nil/empty means use Scopes[key].Namespace
 }
 
 // Capabilities represents the features available based on RBAC permissions
@@ -887,11 +889,16 @@ func CheckResourcePermissions(ctx context.Context) *PermissionCheckResult {
 		for k, v := range cachedPermResult.Scopes {
 			scopesCopy[k] = v
 		}
+		scopeNamespacesCopy := make(map[string][]string, len(cachedPermResult.ScopeNamespaces))
+		for k, v := range cachedPermResult.ScopeNamespaces {
+			scopeNamespacesCopy[k] = append([]string(nil), v...)
+		}
 		result := &PermissionCheckResult{
 			Perms:           &permsCopy,
 			NamespaceScoped: cachedPermResult.NamespaceScoped,
 			Namespace:       cachedPermResult.Namespace,
 			Scopes:          scopesCopy,
+			ScopeNamespaces: scopeNamespacesCopy,
 		}
 		resourcePermsMu.RUnlock()
 		return result
@@ -948,11 +955,12 @@ func buildScopeCandidates(ctx context.Context) []string {
 	// over --namespace). Reach into both globals so when an operator sets
 	// `--namespace` distinct from the context, both surface as candidates.
 	clientMu.RLock()
-	ctxNs, flagNs := contextNamespace, fallbackNamespace
+	ctxNs := contextNamespace
+	flagNamespaces := fallbackNamespaceCandidatesLocked()
 	clientMu.RUnlock()
 
 	accessible, authoritative := GetAccessibleNamespaces(ctx)
-	out, dropped := mergeScopeCandidates(ctxNs, flagNs, accessible, authoritative)
+	out, dropped := mergeScopeCandidateLists(ctxNs, flagNamespaces, accessible, authoritative)
 	if !authoritative {
 		// Authoritative=false means the user can't list namespaces. Without
 		// that list the probe can only try whatever the operator named
@@ -990,6 +998,10 @@ func mergeForcedScopeCandidate(target string, candidates []string) []string {
 // authoritative is false the accessible list is ignored — the caller has
 // already decided that list is not trustworthy as a probe target.
 func mergeScopeCandidates(ctxNs, flagNs string, accessible []string, authoritative bool) (out []string, dropped int) {
+	return mergeScopeCandidateLists(ctxNs, []string{flagNs}, accessible, authoritative)
+}
+
+func mergeScopeCandidateLists(ctxNs string, flagNamespaces []string, accessible []string, authoritative bool) (out []string, dropped int) {
 	seen := map[string]bool{}
 	out = make([]string, 0, MaxScopeCandidates)
 	atCap := false
@@ -1008,7 +1020,9 @@ func mergeScopeCandidates(ctxNs, flagNs string, accessible []string, authoritati
 		}
 	}
 	add(ctxNs)
-	add(flagNs)
+	for _, ns := range flagNamespaces {
+		add(ns)
+	}
 	if !authoritative {
 		return out, 0
 	}
@@ -1074,7 +1088,8 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 	probes := resourceProbeTargets(perms)
 
 	type probeOutcome struct {
-		scope k8score.ResourceScope
+		scope      k8score.ResourceScope
+		namespaces []string
 	}
 	outcomes := make([]probeOutcome, len(probes))
 
@@ -1146,18 +1161,24 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 			if !forbidden || p.clusterOnly || len(scopeNamespaces) == 0 {
 				return
 			}
-			// Try candidate namespaces in priority order. First grant wins.
-			// Multi-ns users (secret-list in NS A and NS B but neither
-			// cluster-wide) get partial coverage of one ns per kind — proper
-			// multi-ns scope per kind would need the cache to support it.
+			// Try candidate namespaces in priority order. Every grant becomes
+			// part of the per-kind informer fanout; Namespace keeps the first
+			// grant as the stable primary for legacy diagnostics and dynamic
+			// fallback paths.
+			grantedNamespaces := make([]string, 0, len(scopeNamespaces))
 			for _, ns := range scopeNamespaces {
 				nsAllowed, _, nsTransient := probeKindAccess(ctx, dyn, p, ns)
 				if nsTransient != nil {
 					hadErrors.Store(true)
 				}
 				if nsAllowed {
-					outcomes[i] = probeOutcome{scope: k8score.ResourceScope{Enabled: true, Namespace: ns}}
-					return
+					grantedNamespaces = append(grantedNamespaces, ns)
+				}
+			}
+			if len(grantedNamespaces) > 0 {
+				outcomes[i] = probeOutcome{
+					scope:      k8score.ResourceScope{Enabled: true, Namespace: grantedNamespaces[0]},
+					namespaces: grantedNamespaces,
 				}
 			}
 		}(i, p)
@@ -1173,6 +1194,7 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 
 	// Apply outcomes to perms (boolean projection) and build the scope map.
 	scopes := make(map[string]k8score.ResourceScope, len(probes))
+	scopeNamespacesByKind := make(map[string][]string)
 	namespaceScoped := false
 	var (
 		restricted   []string
@@ -1186,6 +1208,9 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 			if r.scope.Namespace != "" {
 				namespaceScoped = true
 				nsScopedKeys = append(nsScopedKeys, p.key)
+				if len(r.namespaces) > 1 {
+					scopeNamespacesByKind[p.key] = append([]string(nil), r.namespaces...)
+				}
 			}
 		} else {
 			restricted = append(restricted, p.key)
@@ -1198,7 +1223,15 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 	// inject lines. CodeQL doesn't model %q escaping, so be explicit.
 	scopedDetail := make([]string, 0, len(nsScopedKeys))
 	for _, k := range nsScopedKeys {
-		scopedDetail = append(scopedDetail, fmt.Sprintf("%s=%s", k, SanitizeForLog(scopes[k].Namespace)))
+		if namespaces := scopeNamespacesByKind[k]; len(namespaces) > 1 {
+			safeNamespaces := make([]string, 0, len(namespaces))
+			for _, ns := range namespaces {
+				safeNamespaces = append(safeNamespaces, SanitizeForLog(ns))
+			}
+			scopedDetail = append(scopedDetail, fmt.Sprintf("%s=%q", k, safeNamespaces))
+		} else {
+			scopedDetail = append(scopedDetail, fmt.Sprintf("%s=%s", k, SanitizeForLog(scopes[k].Namespace)))
+		}
 	}
 	sort.Strings(scopedDetail)
 	candidatesLog := make([]string, 0, len(scopeNamespaces))
@@ -1241,6 +1274,7 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 		NamespaceScoped: namespaceScoped,
 		Namespace:       primaryNs,
 		Scopes:          scopes,
+		ScopeNamespaces: scopeNamespacesByKind,
 	}, hadErrors.Load()
 }
 
@@ -1259,11 +1293,16 @@ func GetCachedPermissionResult() *PermissionCheckResult {
 	for k, v := range cachedPermResult.Scopes {
 		scopesCopy[k] = v
 	}
+	scopeNamespacesCopy := make(map[string][]string, len(cachedPermResult.ScopeNamespaces))
+	for k, v := range cachedPermResult.ScopeNamespaces {
+		scopeNamespacesCopy[k] = append([]string(nil), v...)
+	}
 	return &PermissionCheckResult{
 		Perms:           &permsCopy,
 		NamespaceScoped: cachedPermResult.NamespaceScoped,
 		Namespace:       cachedPermResult.Namespace,
 		Scopes:          scopesCopy,
+		ScopeNamespaces: scopeNamespacesCopy,
 	}
 }
 

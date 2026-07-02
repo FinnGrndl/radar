@@ -152,17 +152,18 @@ func InitResourceCache(ctx context.Context) error {
 		}
 
 		cfg := k8score.CacheConfig{
-			Client:              k8sClient,
-			ResourceScopes:      scopes,
-			DeferredTypes:       deferredResources,
-			DebugEvents:         DebugEvents,
-			TimingLogger:        logTiming,
-			PatienceWindow:      firstPaintPatience,
-			MinimalSet:          minimalFirstPaintSet,
-			SyncTimeout:         FirstPaintBackstop,
-			SyncProgress:        emitSyncProgress,
-			DeferredSyncTimeout: 3 * time.Minute,
-			ListPageSize:        ListPageSize,
+			Client:                  k8sClient,
+			ResourceScopes:          scopes,
+			ResourceScopeNamespaces: permResult.ScopeNamespaces,
+			DeferredTypes:           deferredResources,
+			DebugEvents:             DebugEvents,
+			TimingLogger:            logTiming,
+			PatienceWindow:          firstPaintPatience,
+			MinimalSet:              minimalFirstPaintSet,
+			SyncTimeout:             FirstPaintBackstop,
+			SyncProgress:            emitSyncProgress,
+			DeferredSyncTimeout:     3 * time.Minute,
+			ListPageSize:            ListPageSize,
 
 			OnReceived: func(kind string) {
 				timeline.IncrementReceived(kind)

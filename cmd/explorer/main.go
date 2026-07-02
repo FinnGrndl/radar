@@ -49,6 +49,7 @@ func main() {
 	kubeconfig := flag.String("kubeconfig", fileCfg.Kubeconfig, "Path to kubeconfig file (default: ~/.kube/config)")
 	kubeconfigDir := flag.String("kubeconfig-dir", fileCfg.KubeconfigDirsFlag(), "Comma-separated directories containing kubeconfig files (mutually exclusive with --kubeconfig)")
 	namespace := flag.String("namespace", fileCfg.Namespace, "Initial namespace filter (empty = all namespaces)")
+	namespaces := flag.String("namespaces", fileCfg.NamespacesFlag(), "Initial namespace filters as a comma-separated list (e.g. ns1,ns2,ns3). Use this when you can list resources in specific namespaces but cannot list namespaces cluster-wide.")
 	port := flag.Int("port", fileCfg.PortOr(9280), "Server port")
 	noBrowser := flag.Bool("no-browser", fileCfg.NoBrowser, "Don't auto-open browser")
 	browser := flag.String("browser", fileCfg.Browser, "Browser to use when opening the UI (default: OS default browser; macOS app names supported)")
@@ -176,9 +177,16 @@ func main() {
 		log.Fatalf("Invalid --timeline-max-size %q: %v", *timelineMaxSize, err)
 	}
 	noMCPFlagSet := false
+	namespaceFlagSet := false
+	namespacesFlagSet := false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "no-mcp" {
+		switch f.Name {
+		case "no-mcp":
 			noMCPFlagSet = true
+		case "namespace":
+			namespaceFlagSet = true
+		case "namespaces":
+			namespacesFlagSet = true
 		}
 	})
 	if *mcpCatalogOnly && noMCPFlagSet && *noMCP {
@@ -191,6 +199,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("Invalid Prometheus header configuration: %v", err)
 	}
+	resolvedNamespace, resolvedNamespaces, err := app.ResolveNamespaceSelection(*namespace, *namespaces, namespaceFlagSet, namespacesFlagSet)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	if *namespaceScope && len(resolvedNamespaces) > 1 {
+		log.Fatalf("--namespace-scope supports a single namespace; use --namespace instead of --namespaces with multiple values")
+	}
+	if *namespaceScope && len(resolvedNamespaces) == 1 {
+		resolvedNamespace = resolvedNamespaces[0]
+		resolvedNamespaces = nil
+	}
 	mcpEnabled := !*noMCP
 	if *mcpCatalogOnly || *mcpCatalogStdio {
 		mcpEnabled = true
@@ -199,7 +218,8 @@ func main() {
 	cfg := app.AppConfig{
 		Kubeconfig:               *kubeconfig,
 		KubeconfigDirs:           app.ParseKubeconfigDirs(*kubeconfigDir),
-		Namespace:                *namespace,
+		Namespace:                resolvedNamespace,
+		Namespaces:               resolvedNamespaces,
 		Port:                     *port,
 		NoBrowser:                *noBrowser,
 		Browser:                  *browser,
@@ -303,7 +323,9 @@ func main() {
 	// Open browser — server is confirmed ready to accept connections
 	if !cfg.NoBrowser {
 		url := fmt.Sprintf("http://localhost:%d", cfg.Port)
-		if cfg.Namespace != "" {
+		if len(cfg.Namespaces) > 0 {
+			url += fmt.Sprintf("?namespaces=%s", strings.Join(cfg.Namespaces, ","))
+		} else if cfg.Namespace != "" {
 			url += fmt.Sprintf("?namespace=%s", cfg.Namespace)
 		}
 		go app.OpenBrowser(url, cfg.Browser)

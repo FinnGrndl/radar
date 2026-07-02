@@ -104,6 +104,23 @@ func TestSetActiveNamespaceForUser_NoAuth(t *testing.T) {
 	}
 }
 
+func TestLoadSavedNamespacePreference_ConfiguredNamespacesSeedOnce(t *testing.T) {
+	s := newTestServer(t)
+	s.configuredNamespaces = []string{"team-a", "team-b"}
+	req := reqAs("alice")
+
+	s.loadSavedNamespacePreference(req)
+	if got := s.getActiveNamespaceForUser(req); !slices.Equal(got, []string{"team-a", "team-b"}) {
+		t.Fatalf("configured namespace seed = %v, want [team-a team-b]", got)
+	}
+
+	s.setActiveNamespaceForUser(req, nil)
+	s.loadSavedNamespacePreference(req)
+	if got := s.getActiveNamespaceForUser(req); len(got) != 0 {
+		t.Fatalf("configured namespace list re-seeded after clear: %v", got)
+	}
+}
+
 func TestSetActiveNamespaceForUser_DefensiveCopy(t *testing.T) {
 	// Mutating the caller's slice after a Set must not corrupt stored state.
 	s := newTestServer(t)

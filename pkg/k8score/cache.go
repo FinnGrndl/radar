@@ -31,6 +31,7 @@ type ResourceCache struct {
 	factory          informers.SharedInformerFactory            // cluster-wide factory (always present)
 	nsFactories      map[string]informers.SharedInformerFactory // per-namespace factories (for mixed-scope mode)
 	factoryByKind    map[string]informers.SharedInformerFactory // resolved factory per enabled kind — listers MUST go through this
+	indexerByKind    map[string]cache.Indexer                   // union indexer for kinds watched in multiple namespace factories
 	pagedInformers   map[string]cache.SharedIndexInformer       // per-kind paginating informers (ListPageSize>0); listers read these instead of the factory's
 	changes          chan ResourceChange
 	stopCh           chan struct{}
@@ -134,6 +135,72 @@ func newPagedInformer(
 	return inf
 }
 
+func cloneScopeNamespaces(in map[string][]string) map[string][]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		if len(v) == 0 {
+			continue
+		}
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
+func resourceScopeNamespaces(key string, scope ResourceScope, byKind map[string][]string) []string {
+	if !scope.Enabled || scope.Namespace == "" {
+		return nil
+	}
+	namespaces := byKind[key]
+	if len(namespaces) == 0 {
+		return []string{scope.Namespace}
+	}
+	seen := make(map[string]struct{}, len(namespaces)+1)
+	out := make([]string, 0, len(namespaces)+1)
+	add := func(ns string) {
+		if ns == "" {
+			return
+		}
+		if _, ok := seen[ns]; ok {
+			return
+		}
+		seen[ns] = struct{}{}
+		out = append(out, ns)
+	}
+	add(scope.Namespace)
+	for _, ns := range namespaces {
+		add(ns)
+	}
+	return out
+}
+
+func newUnionIndexer() cache.Indexer {
+	return cache.NewIndexer(
+		cache.MetaNamespaceKeyFunc,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+	)
+}
+
+func mirrorInformerToIndexer(inf cache.SharedIndexInformer, idx cache.Indexer) error {
+	_, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			_ = idx.Update(obj)
+		},
+		UpdateFunc: func(_, newObj any) {
+			_ = idx.Update(newObj)
+		},
+		DeleteFunc: func(obj any) {
+			if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+				obj = tombstone.Obj
+			}
+			_ = idx.Delete(obj)
+		},
+	})
+	return err
+}
+
 // NewResourceCache creates and starts a ResourceCache from the given config.
 // Startup has three tiers:
 //   - Critical informers block until synced. With PatienceWindow + MinimalSet,
@@ -157,6 +224,21 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 			return nil, fmt.Errorf("CacheConfig.ResourceScopes contains entry with empty key")
 		}
 	}
+	for k, namespaces := range cfg.ResourceScopeNamespaces {
+		if k == "" {
+			return nil, fmt.Errorf("CacheConfig.ResourceScopeNamespaces contains entry with empty key")
+		}
+		if len(namespaces) == 0 {
+			continue
+		}
+		scope, ok := cfg.ResourceScopes[k]
+		if !ok || !scope.Enabled {
+			return nil, fmt.Errorf("CacheConfig.ResourceScopeNamespaces contains namespaces for disabled key %q", k)
+		}
+		if scope.Namespace == "" {
+			return nil, fmt.Errorf("CacheConfig.ResourceScopeNamespaces contains namespaces for cluster-wide key %q", k)
+		}
+	}
 
 	channelSize := cfg.ChannelSize
 	if channelSize <= 0 {
@@ -176,6 +258,7 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 	// Clone caller-owned maps to prevent mutation after construction.
 	cfg.ResourceTypes = maps.Clone(cfg.ResourceTypes)
 	cfg.ResourceScopes = maps.Clone(cfg.ResourceScopes)
+	cfg.ResourceScopeNamespaces = cloneScopeNamespaces(cfg.ResourceScopeNamespaces)
 	cfg.DeferredTypes = maps.Clone(cfg.DeferredTypes)
 	cfg.MinimalSet = maps.Clone(cfg.MinimalSet)
 
@@ -215,19 +298,22 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 		informers.WithTransform(DropManagedFields),
 	)
 	nsFactories := make(map[string]informers.SharedInformerFactory)
-	for _, s := range scopes {
-		if s.Namespace == "" {
+	for key, s := range scopes {
+		namespaces := resourceScopeNamespaces(key, s, cfg.ResourceScopeNamespaces)
+		if len(namespaces) == 0 {
 			continue
 		}
-		if _, ok := nsFactories[s.Namespace]; ok {
-			continue
+		for _, namespace := range namespaces {
+			if _, ok := nsFactories[namespace]; ok {
+				continue
+			}
+			nsFactories[namespace] = informers.NewSharedInformerFactoryWithOptions(
+				cfg.Client,
+				0,
+				informers.WithTransform(DropManagedFields),
+				informers.WithNamespace(namespace),
+			)
 		}
-		nsFactories[s.Namespace] = informers.NewSharedInformerFactoryWithOptions(
-			cfg.Client,
-			0,
-			informers.WithTransform(DropManagedFields),
-			informers.WithNamespace(s.Namespace),
-		)
 	}
 	if len(nsFactories) > 0 {
 		var nsList []string
@@ -277,6 +363,7 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 		factory:          clusterFactory,
 		nsFactories:      nsFactories,
 		factoryByKind:    map[string]informers.SharedInformerFactory{},
+		indexerByKind:    map[string]cache.Indexer{},
 		pagedInformers:   map[string]cache.SharedIndexInformer{},
 		changes:          changes,
 		stopCh:           stopCh,
@@ -292,30 +379,18 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 		key      string
 		deferred bool
 		synced   cache.InformerSynced
-		informer cache.SharedIndexInformer
+		run      func(stopCh <-chan struct{})
 	}
 	var allEntries []informerEntry
 
-	for _, s := range setups {
-		if !enabled[s.key] {
-			continue
-		}
-		enabledCount++
-		factory := pickFactory(s)
-		rc.factoryByKind[s.key] = factory
-
-		var inf cache.SharedIndexInformer
+	buildInformer := func(s informerSetup, factory informers.SharedInformerFactory, namespace string) cache.SharedIndexInformer {
 		if cfg.ListPageSize > 0 && s.pagedSetup != nil {
-			// scopes[s.key].Namespace is "" for cluster-wide access or the
-			// single namespace a restricted user is scoped to.
-			inf = s.pagedSetup(cfg.Client, scopes[s.key].Namespace, cfg.ListPageSize)
-			// Listers must read this informer's store, not the factory's
-			// (the factory's informer for this kind is never started).
-			rc.pagedInformers[s.key] = inf
-		} else {
-			inf = s.setup(factory)
+			return s.pagedSetup(cfg.Client, namespace, cfg.ListPageSize)
 		}
+		return s.setup(factory)
+	}
 
+	wireInformer := func(inf cache.SharedIndexInformer, s informerSetup, idx int) error {
 		var err error
 		if s.isEvent {
 			err = rc.addEventHandlers(inf, changes)
@@ -323,8 +398,7 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 			err = rc.addChangeHandlers(inf, s.kind, changes)
 		}
 		if err != nil {
-			close(stopCh)
-			return nil, fmt.Errorf("failed to register %s event handler: %w", s.kind, err)
+			return fmt.Errorf("failed to register %s event handler: %w", s.kind, err)
 		}
 
 		// Wire a WatchErrorHandler so reflector-level failures (most
@@ -333,7 +407,6 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 		// mid-session) are visible in diagnostics. The reflector keeps
 		// retrying with exponential backoff regardless; this just makes
 		// the failure observable instead of silent.
-		idx := len(allEntries) // status index for this informer
 		key := s.key
 		kind := s.kind
 		if hErr := inf.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
@@ -343,21 +416,85 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 			// started, which can't happen here — log and continue.
 			stdlog.Printf("Warning: failed to set watch error handler for %s: %v", s.kind, hErr)
 		}
+		return nil
+	}
+
+	for _, s := range setups {
+		if !enabled[s.key] {
+			continue
+		}
+		enabledCount++
+		idx := len(allEntries) // status index for this logical kind
+		scopeNamespaces := resourceScopeNamespaces(s.key, scopes[s.key], cfg.ResourceScopeNamespaces)
+
+		var synced cache.InformerSynced
+		var run func(stopCh <-chan struct{})
+
+		if !s.isClusterScoped && len(scopeNamespaces) > 1 {
+			unionIndexer := newUnionIndexer()
+			rc.indexerByKind[s.key] = unionIndexer
+			informersForKind := make([]cache.SharedIndexInformer, 0, len(scopeNamespaces))
+			for _, namespace := range scopeNamespaces {
+				factory := nsFactories[namespace]
+				inf := buildInformer(s, factory, namespace)
+				if err := mirrorInformerToIndexer(inf, unionIndexer); err != nil {
+					close(stopCh)
+					return nil, fmt.Errorf("failed to register %s union indexer handler: %w", s.kind, err)
+				}
+				if err := wireInformer(inf, s, idx); err != nil {
+					close(stopCh)
+					return nil, err
+				}
+				informersForKind = append(informersForKind, inf)
+			}
+			synced = func() bool {
+				for _, inf := range informersForKind {
+					if !inf.HasSynced() {
+						return false
+					}
+				}
+				return true
+			}
+			run = func(stopCh <-chan struct{}) {
+				for _, inf := range informersForKind {
+					go inf.Run(stopCh)
+				}
+			}
+		} else {
+			factory := pickFactory(s)
+			rc.factoryByKind[s.key] = factory
+			namespace := scopes[s.key].Namespace
+			if s.isClusterScoped {
+				namespace = ""
+			}
+			inf := buildInformer(s, factory, namespace)
+			if cfg.ListPageSize > 0 && s.pagedSetup != nil {
+				// Listers must read this informer's store, not the factory's
+				// (the factory's informer for this kind is never started).
+				rc.pagedInformers[s.key] = inf
+			}
+			if err := wireInformer(inf, s, idx); err != nil {
+				close(stopCh)
+				return nil, err
+			}
+			synced = inf.HasSynced
+			run = inf.Run
+		}
 
 		isDeferred := deferredTypes[s.key]
-		entry := informerEntry{kind: s.kind, key: s.key, deferred: isDeferred, synced: inf.HasSynced, informer: inf}
+		entry := informerEntry{kind: s.kind, key: s.key, deferred: isDeferred, synced: synced, run: run}
 		allEntries = append(allEntries, entry)
 
 		if isDeferred && s.isEvent {
 			// Events sync independently — they can take 60s+ on large clusters
 			// and shouldn't block topology completion or warmup transition.
-			backgroundSyncFuncs = append(backgroundSyncFuncs, inf.HasSynced)
+			backgroundSyncFuncs = append(backgroundSyncFuncs, synced)
 			backgroundKeys = append(backgroundKeys, s.key)
 		} else if isDeferred {
-			deferredSyncFuncs = append(deferredSyncFuncs, inf.HasSynced)
+			deferredSyncFuncs = append(deferredSyncFuncs, synced)
 			deferredKeys = append(deferredKeys, s.key)
 		} else {
-			criticalSyncFuncs = append(criticalSyncFuncs, inf.HasSynced)
+			criticalSyncFuncs = append(criticalSyncFuncs, synced)
 		}
 	}
 
@@ -384,7 +521,7 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 	// bandwidth during the critical path.
 	for _, e := range allEntries {
 		if !e.deferred {
-			go e.informer.Run(stopCh)
+			go e.run(stopCh)
 		}
 	}
 
@@ -681,7 +818,7 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 	// then wait for them in background. This staggers the API server load.
 	for _, e := range allEntries {
 		if e.deferred {
-			go e.informer.Run(stopCh)
+			go e.run(stopCh)
 		}
 	}
 
@@ -1208,7 +1345,7 @@ func (rc *ResourceCache) IsKindClusterWide(resource string) bool {
 		return false
 	}
 	s, ok := rc.config.ResourceScopes[resource]
-	return ok && s.Enabled && s.Namespace == ""
+	return ok && s.Enabled && s.Namespace == "" && len(rc.config.ResourceScopeNamespaces[resource]) == 0
 }
 
 // ChangesRaw returns the bidirectional channel for internal use.

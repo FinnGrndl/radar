@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -267,6 +268,55 @@ func TestProbeResourceAccess_FallbackCandidatesBeyondFirst(t *testing.T) {
 	// to `default` where the user has nothing.
 	if result.Namespace != accessibleNs {
 		t.Errorf("result.Namespace = %q, want %q so CRD informer fallback lands where the user has reads", result.Namespace, accessibleNs)
+	}
+}
+
+func TestProbeResourceAccess_FallbackCollectsMultipleNamespaces(t *testing.T) {
+	const nsA, nsB = "team-a", "team-b"
+	dyn := fakeDyn(t, func(gvr schema.GroupVersionResource, namespace string) bool {
+		return gvr.Group == "" && gvr.Resource == "pods" && (namespace == nsA || namespace == nsB)
+	})
+
+	result, _ := probeResourceAccess(context.Background(), dyn, []string{nsA, nsB, "denied"}, false)
+
+	if got := scopeOf(result, k8score.Pods); got != (k8score.ResourceScope{Enabled: true, Namespace: nsA}) {
+		t.Fatalf("Pods scope = %+v, want primary namespace %q", got, nsA)
+	}
+	if !reflect.DeepEqual(result.ScopeNamespaces[k8score.Pods], []string{nsA, nsB}) {
+		t.Fatalf("Pods ScopeNamespaces = %v, want [%s %s]", result.ScopeNamespaces[k8score.Pods], nsA, nsB)
+	}
+	if result.Namespace != nsA {
+		t.Fatalf("result.Namespace = %q, want %q", result.Namespace, nsA)
+	}
+}
+
+func TestCheckResourcePermissionsCacheHitCopiesScopeNamespaces(t *testing.T) {
+	const nsA, nsB = "team-a", "team-b"
+	resourcePermsMu.Lock()
+	cachedPermResult = &PermissionCheckResult{
+		Perms:           &ResourcePermissions{Pods: true},
+		NamespaceScoped: true,
+		Namespace:       nsA,
+		Scopes: map[string]k8score.ResourceScope{
+			k8score.Pods: {Enabled: true, Namespace: nsA},
+		},
+		ScopeNamespaces: map[string][]string{
+			k8score.Pods: {nsA, nsB},
+		},
+	}
+	resourcePermsExpiry = time.Now().Add(time.Minute)
+	resourcePermsMu.Unlock()
+	t.Cleanup(InvalidateResourcePermissionsCache)
+
+	got := CheckResourcePermissions(context.Background())
+	if !reflect.DeepEqual(got.ScopeNamespaces[k8score.Pods], []string{nsA, nsB}) {
+		t.Fatalf("ScopeNamespaces = %v, want [%s %s]", got.ScopeNamespaces[k8score.Pods], nsA, nsB)
+	}
+	got.ScopeNamespaces[k8score.Pods][0] = "mutated"
+
+	got = CheckResourcePermissions(context.Background())
+	if !reflect.DeepEqual(got.ScopeNamespaces[k8score.Pods], []string{nsA, nsB}) {
+		t.Fatalf("cached ScopeNamespaces was mutated through caller copy: %v", got.ScopeNamespaces[k8score.Pods])
 	}
 }
 

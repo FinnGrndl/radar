@@ -88,7 +88,7 @@ func (s *Server) setActiveNamespaceForUser(r *http.Request, namespaces []string)
 	}
 	key := nsPreferenceKey(username, ctxName)
 	if len(namespaces) == 0 {
-		s.nsPreferences.Delete(key)
+		s.nsPreferences.Store(key, []string{})
 		return
 	}
 	// Defensive copy so callers can mutate their input safely after the store.
@@ -124,20 +124,29 @@ func (s *Server) finalizePostContextSwitch() {
 	s.clearAllNamespacePreferences()
 }
 
-// loadSavedNamespacePreference seeds the per-user map from settings.json on
-// first reach. Only relevant for the no-auth (local single-user) path —
-// auth-enabled deploys don't persist picks across pod restarts.
+// loadSavedNamespacePreference seeds the per-user map on first reach. A
+// configured --namespaces list applies to both local and auth-enabled sessions
+// as the initial view. Without that, only local/no-auth sessions load the
+// persisted per-context pick from settings.json.
 func (s *Server) loadSavedNamespacePreference(r *http.Request) {
-	if auth.UserFromContext(r.Context()) != nil {
-		return // multi-user: no shared persisted pref
-	}
 	ctxName := k8s.GetContextName()
 	if ctxName == "" {
 		return
 	}
-	key := nsPreferenceKey("", ctxName)
+	username := ""
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		username = u.Username
+	}
+	key := nsPreferenceKey(username, ctxName)
 	if _, ok := s.nsPreferences.Load(key); ok {
 		return
+	}
+	if len(s.configuredNamespaces) > 0 {
+		s.nsPreferences.Store(key, append([]string(nil), s.configuredNamespaces...))
+		return
+	}
+	if username != "" {
+		return // multi-user: no shared persisted pref
 	}
 	saved := settings.Load()
 	if saved.ActiveNamespaces == nil {

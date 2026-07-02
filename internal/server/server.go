@@ -55,21 +55,22 @@ import (
 
 // Server is the Explorer HTTP server
 type Server struct {
-	router          *chi.Mux
-	broadcaster     *SSEBroadcaster
-	port            int
-	devMode         bool
-	staticFS        fs.FS
-	startTime       time.Time
-	listener        net.Listener
-	updater         *updater.Updater
-	mcpHandler      http.Handler
-	diagConfig      *DiagConfig
-	effectiveConfig *config.Config // running config for GET /api/config
-	authConfig      auth.Config
-	permCache       *auth.PermissionCache
-	oidcHandler     *auth.OIDCHandler
-	saveFileFunc    func(defaultFilename string, data []byte) (string, error)
+	router               *chi.Mux
+	broadcaster          *SSEBroadcaster
+	port                 int
+	devMode              bool
+	staticFS             fs.FS
+	startTime            time.Time
+	listener             net.Listener
+	updater              *updater.Updater
+	mcpHandler           http.Handler
+	diagConfig           *DiagConfig
+	effectiveConfig      *config.Config // running config for GET /api/config
+	authConfig           auth.Config
+	configuredNamespaces []string
+	permCache            *auth.PermissionCache
+	oidcHandler          *auth.OIDCHandler
+	saveFileFunc         func(defaultFilename string, data []byte) (string, error)
 
 	// nsPreferences holds each user's active-namespace pick from the in-app
 	// switcher. Key shape: "<username>\x00<contextName>" when auth is enabled,
@@ -104,14 +105,15 @@ type Server struct {
 
 // Config holds server configuration
 type Config struct {
-	Port            int
-	DevMode         bool           // Serve frontend from filesystem instead of embedded
-	StaticFS        embed.FS       // Embedded frontend files
-	StaticRoot      string         // Path within StaticFS
-	MCPHandler      http.Handler   // MCP server handler (nil = MCP disabled)
-	DiagConfig      *DiagConfig    // Sanitized config for diagnostics endpoint
-	EffectiveConfig *config.Config // Running startup config for GET /api/config
-	AuthConfig      auth.Config    // Authentication configuration
+	Port                 int
+	DevMode              bool           // Serve frontend from filesystem instead of embedded
+	StaticFS             embed.FS       // Embedded frontend files
+	StaticRoot           string         // Path within StaticFS
+	MCPHandler           http.Handler   // MCP server handler (nil = MCP disabled)
+	DiagConfig           *DiagConfig    // Sanitized config for diagnostics endpoint
+	EffectiveConfig      *config.Config // Running startup config for GET /api/config
+	AuthConfig           auth.Config    // Authentication configuration
+	ConfiguredNamespaces []string       // Initial namespace picks from --namespaces
 }
 
 // New creates a new server instance
@@ -119,17 +121,18 @@ func New(cfg Config) *Server {
 	cfg.AuthConfig.Defaults()
 
 	s := &Server{
-		router:          chi.NewRouter(),
-		broadcaster:     NewSSEBroadcaster(),
-		port:            cfg.Port,
-		devMode:         cfg.DevMode,
-		startTime:       time.Now(),
-		mcpHandler:      cfg.MCPHandler,
-		diagConfig:      cfg.DiagConfig,
-		effectiveConfig: cfg.EffectiveConfig,
-		authConfig:      cfg.AuthConfig,
-		topoMemo:        topology.NewMemoizer(5 * time.Second),
-		rbacMemo:        rbac.NewMemoizer(5 * time.Second),
+		router:               chi.NewRouter(),
+		broadcaster:          NewSSEBroadcaster(),
+		port:                 cfg.Port,
+		devMode:              cfg.DevMode,
+		startTime:            time.Now(),
+		mcpHandler:           cfg.MCPHandler,
+		diagConfig:           cfg.DiagConfig,
+		effectiveConfig:      cfg.EffectiveConfig,
+		authConfig:           cfg.AuthConfig,
+		configuredNamespaces: append([]string(nil), cfg.ConfiguredNamespaces...),
+		topoMemo:             topology.NewMemoizer(5 * time.Second),
+		rbacMemo:             rbac.NewMemoizer(5 * time.Second),
 	}
 
 	// Register a single context-switch callback so every PerformContextSwitch

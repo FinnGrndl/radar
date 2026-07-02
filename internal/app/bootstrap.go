@@ -32,6 +32,7 @@ type AppConfig struct {
 	Kubeconfig               string
 	KubeconfigDirs           []string
 	Namespace                string
+	Namespaces               []string
 	Port                     int
 	NoBrowser                bool
 	Browser                  string
@@ -82,7 +83,9 @@ func InitializeK8s(cfg AppConfig) error {
 		return fmt.Errorf("failed to initialize K8s client: %w", err)
 	}
 
-	if cfg.Namespace != "" {
+	if len(cfg.Namespaces) > 0 {
+		k8s.SetFallbackNamespaces(cfg.Namespaces)
+	} else if cfg.Namespace != "" {
 		k8s.SetFallbackNamespace(cfg.Namespace)
 	}
 	configureNamespaceScopePreferenceResolver(cfg)
@@ -229,6 +232,7 @@ func CreateServer(cfg AppConfig) *server.Server {
 		Kubeconfig:               cfg.Kubeconfig,
 		KubeconfigDirs:           cfg.KubeconfigDirs,
 		Namespace:                cfg.Namespace,
+		Namespaces:               cfg.Namespaces,
 		Port:                     cfg.Port,
 		NoBrowser:                cfg.NoBrowser,
 		Browser:                  cfg.Browser,
@@ -244,11 +248,12 @@ func CreateServer(cfg AppConfig) *server.Server {
 	}
 
 	serverCfg := server.Config{
-		Port:            cfg.Port,
-		DevMode:         cfg.DevMode,
-		StaticFS:        static.FS,
-		StaticRoot:      "dist",
-		EffectiveConfig: effectiveCfg,
+		Port:                 cfg.Port,
+		DevMode:              cfg.DevMode,
+		StaticFS:             static.FS,
+		StaticRoot:           "dist",
+		EffectiveConfig:      effectiveCfg,
+		ConfiguredNamespaces: cfg.Namespaces,
 		DiagConfig: &server.DiagConfig{
 			Port:                 cfg.Port,
 			DevMode:              cfg.DevMode,
@@ -558,4 +563,45 @@ func ParseKubeconfigDirs(dirs string) []string {
 		}
 	}
 	return result
+}
+
+// ParseNamespaces splits a comma-separated namespace string into a de-duplicated
+// slice. Empty items are ignored so flags like "--namespaces a,,b" behave like
+// kubectl's comma-separated lists instead of creating an empty namespace pick.
+func ParseNamespaces(namespaces string) []string {
+	if namespaces == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var result []string
+	for ns := range strings.SplitSeq(namespaces, ",") {
+		ns = strings.TrimSpace(ns)
+		if ns == "" {
+			continue
+		}
+		if _, ok := seen[ns]; ok {
+			continue
+		}
+		seen[ns] = struct{}{}
+		result = append(result, ns)
+	}
+	return result
+}
+
+// ResolveNamespaceSelection applies CLI/config precedence for --namespace and
+// --namespaces. Explicit flags win over config defaults; setting both flags
+// explicitly is ambiguous and returns an error.
+func ResolveNamespaceSelection(namespace, namespaces string, namespaceSet, namespacesSet bool) (string, []string, error) {
+	namespace = strings.TrimSpace(namespace)
+	parsedNamespaces := ParseNamespaces(namespaces)
+	if namespaceSet && namespacesSet && namespace != "" && len(parsedNamespaces) > 0 {
+		return "", nil, fmt.Errorf("--namespace and --namespaces are mutually exclusive")
+	}
+	if len(parsedNamespaces) > 0 && (namespacesSet || !namespaceSet) {
+		return "", parsedNamespaces, nil
+	}
+	if namespace == "" {
+		return "", nil, nil
+	}
+	return namespace, nil, nil
 }

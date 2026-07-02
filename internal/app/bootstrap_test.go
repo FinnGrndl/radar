@@ -33,6 +33,45 @@ func TestValidateNamespaceScopeTarget(t *testing.T) {
 	}
 }
 
+func TestParseNamespaces(t *testing.T) {
+	got := ParseNamespaces(" team-a,team-b,,team-a , team-c ")
+	want := []string{"team-a", "team-b", "team-c"}
+	if len(got) != len(want) {
+		t.Fatalf("ParseNamespaces length = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ParseNamespaces[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestResolveNamespaceSelection(t *testing.T) {
+	t.Run("namespaces default wins over namespace config", func(t *testing.T) {
+		ns, nss, err := ResolveNamespaceSelection("legacy", "team-a,team-b", false, false)
+		if err != nil {
+			t.Fatalf("ResolveNamespaceSelection: %v", err)
+		}
+		if ns != "" || len(nss) != 2 || nss[0] != "team-a" || nss[1] != "team-b" {
+			t.Fatalf("got namespace=%q namespaces=%v, want namespaces team-a/team-b", ns, nss)
+		}
+	})
+	t.Run("explicit namespace overrides namespaces config", func(t *testing.T) {
+		ns, nss, err := ResolveNamespaceSelection("prod", "team-a,team-b", true, false)
+		if err != nil {
+			t.Fatalf("ResolveNamespaceSelection: %v", err)
+		}
+		if ns != "prod" || len(nss) != 0 {
+			t.Fatalf("got namespace=%q namespaces=%v, want prod only", ns, nss)
+		}
+	})
+	t.Run("explicit conflict", func(t *testing.T) {
+		if _, _, err := ResolveNamespaceSelection("prod", "team-a,team-b", true, true); err == nil {
+			t.Fatal("ResolveNamespaceSelection conflict returned nil error")
+		}
+	})
+}
+
 func TestConfigureNamespaceScopePreferenceResolverUsesSingleSavedLocalPick(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	k8s.ResetTestState()
