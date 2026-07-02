@@ -186,7 +186,7 @@ func newUnionIndexer() cache.Indexer {
 func mirrorInformerToIndexer(inf cache.SharedIndexInformer, idx cache.Indexer) error {
 	_, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
-			_ = idx.Update(obj)
+			_ = idx.Add(obj)
 		},
 		UpdateFunc: func(_, newObj any) {
 			_ = idx.Update(newObj)

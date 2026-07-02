@@ -1006,6 +1006,123 @@ func TestNewResourceCache_ResourceScopeNamespacesUnion(t *testing.T) {
 	}
 }
 
+type recordingIndexer struct {
+	cache.Indexer
+	addCount    atomic.Int32
+	updateCount atomic.Int32
+}
+
+func (r *recordingIndexer) Add(obj any) error {
+	r.addCount.Add(1)
+	return r.Indexer.Add(obj)
+}
+
+func (r *recordingIndexer) Update(obj any) error {
+	r.updateCount.Add(1)
+	return r.Indexer.Update(obj)
+}
+
+type capturingSharedIndexInformer struct {
+	handler cache.ResourceEventHandler
+	indexer cache.Indexer
+}
+
+func (c *capturingSharedIndexInformer) AddEventHandler(handler cache.ResourceEventHandler) (cache.ResourceEventHandlerRegistration, error) {
+	c.handler = handler
+	return nil, nil
+}
+
+func (c *capturingSharedIndexInformer) AddEventHandlerWithResyncPeriod(handler cache.ResourceEventHandler, _ time.Duration) (cache.ResourceEventHandlerRegistration, error) {
+	c.handler = handler
+	return nil, nil
+}
+
+func (c *capturingSharedIndexInformer) AddEventHandlerWithOptions(handler cache.ResourceEventHandler, _ cache.HandlerOptions) (cache.ResourceEventHandlerRegistration, error) {
+	c.handler = handler
+	return nil, nil
+}
+
+func (c *capturingSharedIndexInformer) RemoveEventHandler(cache.ResourceEventHandlerRegistration) error {
+	return nil
+}
+
+func (c *capturingSharedIndexInformer) GetStore() cache.Store {
+	return c.indexer
+}
+
+func (c *capturingSharedIndexInformer) GetController() cache.Controller {
+	return nil
+}
+
+func (c *capturingSharedIndexInformer) Run(<-chan struct{}) {}
+
+func (c *capturingSharedIndexInformer) RunWithContext(context.Context) {}
+
+func (c *capturingSharedIndexInformer) HasSynced() bool {
+	return true
+}
+
+func (c *capturingSharedIndexInformer) HasSyncedChecker() cache.DoneChecker {
+	return nil
+}
+
+func (c *capturingSharedIndexInformer) LastSyncResourceVersion() string {
+	return ""
+}
+
+func (c *capturingSharedIndexInformer) SetWatchErrorHandler(cache.WatchErrorHandler) error {
+	return nil
+}
+
+func (c *capturingSharedIndexInformer) SetWatchErrorHandlerWithContext(cache.WatchErrorHandlerWithContext) error {
+	return nil
+}
+
+func (c *capturingSharedIndexInformer) SetTransform(cache.TransformFunc) error {
+	return nil
+}
+
+func (c *capturingSharedIndexInformer) IsStopped() bool {
+	return false
+}
+
+func (c *capturingSharedIndexInformer) AddIndexers(cache.Indexers) error {
+	return nil
+}
+
+func (c *capturingSharedIndexInformer) GetIndexer() cache.Indexer {
+	return c.indexer
+}
+
+func TestMirrorInformerToIndexer_AddFuncUsesAdd(t *testing.T) {
+	const ns = "team-a"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: ns, UID: "pod-a", ResourceVersion: "1"},
+	}
+	idx := &recordingIndexer{Indexer: newUnionIndexer()}
+	inf := &capturingSharedIndexInformer{indexer: cache.NewIndexer(cache.MetaNamespaceKeyFunc, nil)}
+
+	if err := mirrorInformerToIndexer(inf, idx); err != nil {
+		t.Fatalf("mirrorInformerToIndexer: %v", err)
+	}
+	if inf.handler == nil {
+		t.Fatal("mirrorInformerToIndexer did not register a handler")
+	}
+	inf.handler.OnAdd(pod, true)
+
+	if _, exists, err := idx.GetByKey(ns + "/pod-a"); err != nil {
+		t.Fatalf("GetByKey: %v", err)
+	} else if !exists {
+		t.Fatal("mirrored pod was not added to union indexer")
+	}
+	if got := idx.addCount.Load(); got == 0 {
+		t.Fatal("initial informer add did not call Indexer.Add")
+	}
+	if got := idx.updateCount.Load(); got != 0 {
+		t.Fatalf("initial informer add called Indexer.Update %d time(s), want 0", got)
+	}
+}
+
 // TestNewResourceCache_ResourceScopesEmpty verifies that an explicitly
 // empty ResourceScopes map (no kinds enabled) produces a cache with no
 // informers, vs nil ResourceScopes which falls through to the legacy
