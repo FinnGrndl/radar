@@ -54,6 +54,10 @@
   --border-default: light-dark(#D8E0EE, #222840);
   --border-light: light-dark(#CDD6E8, #2C324A);
   --border-subtle: light-dark(rgba(74, 100, 180, 0.07), rgba(255, 255, 255, 0.04));
+  /* Emphasis edge for the focused/expanded card in a queue — must read clearly
+     against sibling cards' --border-default, unlike --border-light's one-notch
+     step. */
+  --border-emphasis: light-dark(#96A8CA, rgba(255, 255, 255, 0.22));
   --border-focus: var(--color-brand);
 
   /* ── Accent ── */
@@ -107,6 +111,16 @@
   --group-icon-namespace: light-dark(#2563eb, #60a5fa);
   --group-icon-app: light-dark(#059669, #34d399);
   --group-icon-label: light-dark(#d97706, #fbbf24);
+
+  /* ── Terminal / console surface (intentionally dark in BOTH themes — it's a
+     console, not chrome). The outer border darkens on a light page and lightens
+     on a dark one so the block stays defined; the inner divider and text stay
+     light because the surface is always dark. ── */
+  --terminal-bg: #0F172A;
+  --terminal-border: light-dark(#1E293B, rgba(255, 255, 255, 0.10));
+  --terminal-divider: rgba(255, 255, 255, 0.10);
+  --terminal-label: #94A3B8;
+  --terminal-text: #CBD5E1;
 
   /* ── ANSI terminal colors (theme-aware for log viewer) ── */
   --ansi-black:   light-dark(#3b3b3b, #4c4c4c);
