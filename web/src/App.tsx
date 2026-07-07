@@ -6,7 +6,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useLocation, useSearchParams, useNavigationType, NavigationType } from 'react-router-dom'
 import { HomeView } from './components/home/HomeView'
 import { DebugOverlay } from './components/DebugOverlay'
-import { TopologyGraph, TopologySearch, TopologyFilterSidebar, TopologyControls, FreshnessControl, gitOpsRouteForKind, gitOpsRouteForResource, ScopePill } from '@skyhook-io/k8s-ui'
+import { TopologyGraph, TopologySearch, TopologyFilterSidebar, TopologyControls, FreshnessControl, gitOpsRouteForKind, gitOpsRouteForResource, ScopePill, PaneLoader } from '@skyhook-io/k8s-ui'
 import { initNavigationMap } from '@skyhook-io/k8s-ui/utils/navigation'
 import { useAPIResources, CORE_RESOURCES } from './api/apiResources'
 import { TimelineView } from './components/timeline/TimelineView'
@@ -51,8 +51,9 @@ import { routePath, apiUrl, getAuthHeaders, getCredentialsMode } from './api/con
 import { KeyboardShortcutProvider, useRegisterShortcut, useRegisterShortcuts, useSuppressBaseShortcuts } from './hooks/useKeyboardShortcuts'
 import { useAnimatedUnmount } from './hooks/useAnimatedUnmount'
 import { useDocumentTitle } from './hooks/useDocumentTitle'
-import radarLoadingIcon from '@skyhook-io/k8s-ui/assets/radar/radar-icon-loading.svg'
-import { Network, List, Clock, Package, Sun, Moon, Activity, Home, Star, Search, Bug, SquareTerminal, ShieldCheck, GitBranch, HelpCircle } from 'lucide-react'
+import type { ClusterLoadState } from './types/clusterLoadState'
+import { useClusterLoadState } from './hooks/useClusterLoadState'
+import { Network, List, Clock, Package, Sun, Moon, Activity, Home, Star, Search, Bug, SquareTerminal, ShieldCheck, GitBranch, HelpCircle, Loader2 } from 'lucide-react'
 import { useTheme } from './context/ThemeContext'
 import { Tooltip } from './components/ui/Tooltip'
 import { LargeClusterNamespacePicker } from './components/shared/LargeClusterNamespacePicker'
@@ -226,27 +227,10 @@ function AuthBarrier({ authMode }: { authMode: string }) {
 
   if (authMode === 'oidc') {
     return (
-      <div className="flex-1 relative bg-theme-base">
-        <div className="absolute inset-0 pointer-events-none">
-          <img
-            src={radarLoadingIcon}
-            alt=""
-            aria-hidden
-            // Integer offset (50% − 22) — matches the Connecting/Opening splashes;
-            // avoids sub-pixel jitter from translate(-50%) on odd-width viewports.
-            className="absolute w-11 h-11"
-            style={{ left: 'calc(50% - 22px)', top: 'calc(50% - 22px)' }}
-          />
-          <div
-            className="absolute left-1/2 -translate-x-1/2 text-center"
-            style={{ top: 'calc(50% + 34px)' }}
-          >
-            <p className="whitespace-nowrap text-[17px] font-semibold tracking-tight text-theme-text-primary">
-              Redirecting to login…
-            </p>
-          </div>
-        </div>
-      </div>
+      <PaneLoader
+        label="Redirecting to login…"
+        className="flex-1 min-h-0 bg-theme-base"
+      />
     )
   }
 
@@ -279,7 +263,13 @@ function peekOwnerKey(pathname: string, search: string): string {
   return `${pathname}\n${new URLSearchParams(search).get('app') ?? ''}`
 }
 
-function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manageDocumentTitle?: boolean; documentTitleSuffix?: string }) {
+interface AppProps {
+  manageDocumentTitle?: boolean
+  documentTitleSuffix?: string
+  onClusterLoadStateChange?: (state: ClusterLoadState) => void
+}
+
+function AppInner({ manageDocumentTitle = false, documentTitleSuffix, onClusterLoadStateChange }: AppProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const navigationType = useNavigationType()
@@ -894,6 +884,18 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
   // a drawer only ever sits over a real content surface.
   const contentReady = !isSwitching && !authMePending &&
     !(authMe?.authEnabled && !authMe?.username) && connection.state === 'connected'
+
+  const { clusterLoadState, showHomeClusterLoadFallback, clusterLoadInitial } = useClusterLoadState({
+    namespaces,
+    mainView,
+    chromeless,
+    contentReady,
+    onClusterLoadStateChange,
+  })
+  // Suppress the topbar warmup label during the initial dashboard fetch only on
+  // Home, where the center "Loading dashboard…" splash already covers it. Off
+  // Home there's no splash, so keep the label as the only text cue.
+  const showClusterWarmupLabel = clusterLoadState.loading && !(clusterLoadInitial && mainView === 'home')
 
   // Query client for cache invalidation
   const queryClient = useQueryClient()
@@ -1516,7 +1518,7 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
         content column (min-w-0, shrinkable) would fall below the old desktop
         floor at small windows. Embedded mode has no rail → plain 800. */}
     <div
-      className="relative flex h-screen bg-theme-base"
+      className={`relative flex bg-theme-base ${navCustomization.embedded ? 'h-full min-h-0' : 'h-screen'}`}
       style={{ minWidth: 800 + (showNavRail ? (navRailEffectivePinned ? 176 : 56) : 0) }}
     >
       {showNavRail && (
@@ -1590,6 +1592,8 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
                 content={
                   !clusterConnected
                     ? 'Cluster disconnected — click to reconnect'
+                    : clusterLoadState.loading
+                      ? `Connected — ${clusterLoadState.message}`
                     : crdDiscoveryStatus === 'discovering'
                       ? 'Connected — discovering Custom Resources...'
                       : 'Connected'
@@ -1600,7 +1604,9 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
                 {clusterConnected ? (
                   <span
                     className={`block w-2.5 h-2.5 shrink-0 rounded-full ${
-                      crdDiscoveryStatus === 'discovering' ? 'bg-amber-400 animate-pulse' : 'bg-green-500'
+                      crdDiscoveryStatus === 'discovering' || clusterLoadState.loading
+                        ? 'bg-amber-400 animate-pulse'
+                        : 'bg-green-500'
                     }`}
                   />
                 ) : (
@@ -1615,9 +1621,14 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
                   </button>
                 )}
               </Tooltip>
-              {showNavRail && (!clusterConnected || crdDiscoveryStatus === 'discovering') && (
-                <span className="hidden xl:block whitespace-nowrap text-[11px] text-theme-text-tertiary">
-                  {!clusterConnected ? 'Disconnected' : 'Discovering Custom Resources…'}
+              {(showClusterWarmupLabel || (showNavRail && (!clusterConnected || crdDiscoveryStatus === 'discovering'))) && (
+                <span className="hidden xl:flex items-center gap-1.5 whitespace-nowrap text-[11px] text-theme-text-tertiary">
+                  {showClusterWarmupLabel && <Loader2 className="w-3 h-3 animate-spin" />}
+                  {!clusterConnected
+                    ? 'Disconnected'
+                    : showClusterWarmupLabel
+                      ? clusterLoadState.message
+                      : 'Discovering Custom Resources…'}
                 </span>
               )}
             </div>
@@ -1820,95 +1831,60 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
           Icon is pane-anchored so its screen position matches the
           host hub splash across cross-document transitions. */}
       {!isSwitching && !(authMe?.authEnabled && !authMe?.username) && connection.state === 'connecting' && (
-        <div className="flex-1 relative bg-theme-base">
-          {/* Icon absolutely anchored to the pane center. The label block
-              sits at a fixed offset below — independent of label height
-              so multi-line messages (context + progress) don't shift the
-              icon's screen position. */}
-          <div className="absolute inset-0 pointer-events-none">
-            <img
-              src={radarLoadingIcon}
-              alt=""
-              aria-hidden
-              // Integer offset (50% − 22) — avoids sub-pixel jitter from
-              // `translate(-50%, -50%)` on odd-width viewports.
-              className="absolute w-11 h-11"
-              style={{ left: 'calc(50% - 22px)', top: 'calc(50% - 22px)' }}
-            />
-            <div
-              className="absolute left-1/2 -translate-x-1/2 text-center"
-              style={{ top: 'calc(50% + 34px)' }}
-            >
-              {/* 17px semibold matches the other splash surfaces so font
-                  weight doesn't visibly swap during hub → cluster
-                  transitions. Subtitles below stay smaller/dimmer. */}
-              <p className="whitespace-nowrap text-[17px] font-semibold tracking-tight text-theme-text-primary">
-                Connecting to cluster
-              </p>
-              {connection.context && (
-                <p className="text-sm text-theme-text-secondary mt-1">{connection.context}</p>
-              )}
-              {connection.progressMessage && (
-                <p className="text-xs text-theme-text-tertiary animate-pulse mt-3">
-                  {connection.progressMessage}
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
+        <PaneLoader
+          label="Connecting to cluster"
+          className="flex-1 min-h-0 bg-theme-base"
+        >
+          {connection.context && (
+            <span className="mt-1 block text-sm font-normal tracking-normal text-theme-text-secondary">
+              {connection.context}
+            </span>
+          )}
+          {connection.progressMessage && (
+            <span className="mt-3 block text-xs font-normal tracking-normal text-theme-text-tertiary animate-pulse">
+              {connection.progressMessage}
+            </span>
+          )}
+        </PaneLoader>
       )}
 
-      {/* Context switching overlay — icon pane-anchored, label below. */}
+      {/* Context switching overlay */}
       {isSwitching && (
-        <div className="flex-1 relative bg-theme-base">
-          <div className="absolute inset-0 pointer-events-none">
-            <img
-              src={radarLoadingIcon}
-              alt=""
-              aria-hidden
-              // Integer offset (50% − 22) — avoids sub-pixel jitter from
-              // `translate(-50%, -50%)` on odd-width viewports.
-              className="absolute w-11 h-11"
-              style={{ left: 'calc(50% - 22px)', top: 'calc(50% - 22px)' }}
-            />
-            <div
-              className="absolute left-1/2 -translate-x-1/2 text-center"
-              style={{ top: 'calc(50% + 34px)' }}
-            >
-              <div className="whitespace-nowrap text-[17px] font-semibold tracking-tight text-theme-text-primary">Switching context</div>
-              {targetContext && (
-                <div className="text-xs mt-2 text-theme-text-tertiary">
-                  {targetContext.provider ? (
-                    <span className="flex items-center justify-center gap-1.5">
-                      <span className="text-blue-400 font-medium">{targetContext.provider}</span>
-                      {targetContext.account && (
-                        <>
-                          <span className="text-theme-text-tertiary/50">•</span>
-                          <span>{targetContext.account}</span>
-                        </>
-                      )}
-                      {targetContext.region && (
-                        <>
-                          <span className="text-theme-text-tertiary/50">•</span>
-                          <span>{targetContext.region}</span>
-                        </>
-                      )}
+        <PaneLoader
+          label="Switching context"
+          className="flex-1 min-h-0 bg-theme-base"
+        >
+          {targetContext && (
+            <span className="mt-2 block text-xs font-normal tracking-normal text-theme-text-tertiary">
+              {targetContext.provider ? (
+                <span className="flex items-center justify-center gap-1.5">
+                  <span className="text-blue-400 font-medium">{targetContext.provider}</span>
+                  {targetContext.account && (
+                    <>
                       <span className="text-theme-text-tertiary/50">•</span>
-                      <span className="text-theme-text-secondary font-medium">{targetContext.clusterName}</span>
-                    </span>
-                  ) : (
-                    <span>{targetContext.raw}</span>
+                      <span>{targetContext.account}</span>
+                    </>
                   )}
-                </div>
+                  {targetContext.region && (
+                    <>
+                      <span className="text-theme-text-tertiary/50">•</span>
+                      <span>{targetContext.region}</span>
+                    </>
+                  )}
+                  <span className="text-theme-text-tertiary/50">•</span>
+                  <span className="text-theme-text-secondary font-medium">{targetContext.clusterName}</span>
+                </span>
+              ) : (
+                <span>{targetContext.raw}</span>
               )}
-              {progressMessage && (
-                <div className="text-xs mt-3 text-theme-text-tertiary animate-pulse">
-                  {progressMessage}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+            </span>
+          )}
+          {progressMessage && (
+            <span className="mt-3 block text-xs font-normal tracking-normal text-theme-text-tertiary animate-pulse">
+              {progressMessage}
+            </span>
+          )}
+        </PaneLoader>
       )}
 
       {/* Main content - only show when connected and authenticated */}
@@ -1922,6 +1898,7 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
           <HomeView
             namespaces={namespaces}
             topology={topology}
+            fallbackClusterLoadState={showHomeClusterLoadFallback ? clusterLoadState : undefined}
             onNavigateToView={setMainView}
             onNavigateToResourceKind={(kind, apiGroup, filters) => {
               // Navigate to resources view with kind in URL path
@@ -2167,27 +2144,10 @@ function AppInner({ manageDocumentTitle = false, documentTitleSuffix }: { manage
             own fetches) while the cross-document nav lands. Covers checks /
             issues / gitops with one block since only one view is active. */}
         {viewTakeoverHref && (
-          <div className="flex-1 relative bg-theme-base">
-            {/* Viewport-anchored, 17px — identical to the "Connecting" splash so
-                the mark doesn't move or resize across the takeover hand-off. */}
-            <div className="absolute inset-0 pointer-events-none">
-              <img
-                src={radarLoadingIcon}
-                alt=""
-                aria-hidden
-                className="absolute w-11 h-11"
-                style={{ left: 'calc(50% - 22px)', top: 'calc(50% - 22px)' }}
-              />
-              <div
-                className="absolute left-1/2 -translate-x-1/2 text-center"
-                style={{ top: 'calc(50% + 34px)' }}
-              >
-                <p className="whitespace-nowrap text-[17px] font-semibold tracking-tight text-theme-text-primary">
-                  Opening…
-                </p>
-              </div>
-            </div>
-          </div>
+          <PaneLoader
+            label="Opening…"
+            className="flex-1 min-h-0 bg-theme-base"
+          />
         )}
 
         {/* Best practices detail view (inline only when the host hasn't taken
@@ -2424,14 +2384,18 @@ function FloatingButtons({ showHelp, showCommandPalette, showDiagnostics, onHelp
 }
 
 // Main App component wrapped with providers
-function App({ manageDocumentTitle = false, documentTitleSuffix }: { manageDocumentTitle?: boolean; documentTitleSuffix?: string }) {
+function App({ manageDocumentTitle = false, documentTitleSuffix, onClusterLoadStateChange }: AppProps) {
   return (
     <ConnectionProvider>
       <CapabilitiesProvider>
         <ContextSwitchProvider>
           <DockProvider>
             <KeyboardShortcutProvider>
-              <AppInner manageDocumentTitle={manageDocumentTitle} documentTitleSuffix={documentTitleSuffix} />
+              <AppInner
+                manageDocumentTitle={manageDocumentTitle}
+                documentTitleSuffix={documentTitleSuffix}
+                onClusterLoadStateChange={onClusterLoadStateChange}
+              />
             </KeyboardShortcutProvider>
           </DockProvider>
         </ContextSwitchProvider>
