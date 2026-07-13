@@ -111,6 +111,10 @@ func main() {
 		log.Printf("ERROR: %v", err)
 		os.Exit(1)
 	}
+	if len(resolvedNamespaces) > k8s.MaxScopeCandidates {
+		log.Printf("ERROR: --namespaces lists %d namespaces but the RBAC probe fanout cap is %d", len(resolvedNamespaces), k8s.MaxScopeCandidates)
+		os.Exit(1)
+	}
 
 	cfg := app.AppConfig{
 		Kubeconfig:               *kubeconfig,

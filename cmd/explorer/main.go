@@ -222,6 +222,9 @@ func main() {
 		resolvedNamespace = resolvedNamespaces[0]
 		resolvedNamespaces = nil
 	}
+	if len(resolvedNamespaces) > *maxScopeCandidates {
+		log.Fatalf("--namespaces lists %d namespaces but the RBAC probe fanout cap is %d; raise --max-scope-candidates (or RADAR_MAX_SCOPE_CANDIDATES) to cover all of them", len(resolvedNamespaces), *maxScopeCandidates)
+	}
 	mcpEnabled := !*noMCP
 	if *mcpCatalogOnly || *mcpCatalogStdio {
 		mcpEnabled = true

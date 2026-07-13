@@ -1026,7 +1026,10 @@ func mergeScopeCandidateLists(ctxNs string, flagNamespaces []string, accessible 
 		add(ns)
 	}
 	if !authoritative {
-		return out, 0
+		// Operator-named namespaces can exceed the cap too — report those
+		// drops instead of discarding the count, or the truncation warning
+		// can never fire for exactly the users who typed the list out.
+		return out, dropped
 	}
 	// Iterate the full accessible list after cap so add() counts drops.
 	for _, ns := range accessible {
@@ -1104,6 +1107,8 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 	probeStart := time.Now()
 	var wg sync.WaitGroup
 	var hadErrors atomic.Bool
+	var truncatedMu sync.Mutex
+	var truncatedKinds []string
 	wg.Add(len(probes))
 
 	for i, p := range probes {
@@ -1169,6 +1174,17 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 			// fallback paths.
 			grantedNamespaces := make([]string, 0, len(scopeNamespaces))
 			for _, ns := range scopeNamespaces {
+				if ctx.Err() != nil {
+					// Probe budget exhausted mid-fanout. Keep the grants
+					// collected so far, but record the cut so the operator
+					// can see why later candidates came up missing instead
+					// of silently treating them as denied.
+					hadErrors.Store(true)
+					truncatedMu.Lock()
+					truncatedKinds = append(truncatedKinds, p.key)
+					truncatedMu.Unlock()
+					break
+				}
 				nsAllowed, _, nsTransient := probeKindAccess(ctx, dyn, p, ns)
 				if nsTransient != nil {
 					hadErrors.Store(true)
@@ -1190,8 +1206,17 @@ func probeResourceAccess(ctx context.Context, dyn dynamic.Interface, scopeNamesp
 	logTiming("    Probe phase (%d resources): %v", len(probes), time.Since(probeStart))
 
 	if ctx.Err() != nil {
-		logTiming("   [perms] Bailing after probes: context canceled")
-		return &PermissionCheckResult{Perms: perms, Scopes: map[string]k8score.ResourceScope{}}, true
+		// Deadline expired mid-probe. Keep every outcome that completed —
+		// returning empty scopes here would silently start Radar with no
+		// typed informers at all. hadErrors forces the short error TTL, so
+		// a full re-probe happens soon regardless.
+		hadErrors.Store(true)
+		if len(truncatedKinds) > 0 {
+			sort.Strings(truncatedKinds)
+			log.Printf("RBAC: probe deadline expired before all candidate namespaces were tried for %d kind(s) (%s); untried namespaces are treated as denied until the next probe", len(truncatedKinds), strings.Join(truncatedKinds, ", "))
+		} else {
+			logTiming("   [perms] Probe deadline expired; keeping completed outcomes")
+		}
 	}
 
 	// Apply outcomes to perms (boolean projection) and build the scope map.

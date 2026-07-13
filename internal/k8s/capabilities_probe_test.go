@@ -213,6 +213,20 @@ func TestMergeScopeCandidates_NonAuthoritativeIgnoresAccessible(t *testing.T) {
 	}
 }
 
+// Operator-named namespaces (--namespaces) can exceed the cap on the
+// non-authoritative path too; the count must be reported so the truncation
+// warning fires for exactly the users who typed the list out.
+func TestMergeScopeCandidateLists_NonAuthoritativeReportsFlagDrops(t *testing.T) {
+	out, dropped := mergeScopeCandidateLists("ctx-ns", genNamespaces("team", MaxScopeCandidates+3), nil, false)
+	if len(out) != MaxScopeCandidates {
+		t.Errorf("len(out) = %d, want %d", len(out), MaxScopeCandidates)
+	}
+	// ctx-ns takes one slot, so 4 of the flag namespaces fall past the cap.
+	if dropped != 4 {
+		t.Errorf("dropped = %d, want 4", dropped)
+	}
+}
+
 // Regression: the previous implementation `break`-ed out of the accessible
 // loop on atCap, so dropped never reached the log threshold and operators
 // got no truncation breadcrumb in the very case the log was added for.
