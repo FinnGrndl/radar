@@ -2,6 +2,7 @@ package k8score
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -176,29 +177,121 @@ func resourceScopeNamespaces(key string, scope ResourceScope, byKind map[string]
 	return out
 }
 
-func newUnionIndexer() cache.Indexer {
-	return cache.NewIndexer(
-		cache.MetaNamespaceKeyFunc,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-	)
+// unionIndexer is a read-only cache.Indexer that fans reads out across the
+// per-namespace informer stores of one kind. Each underlying informer watches
+// a distinct namespace, so the union cannot duplicate an object. Reading the
+// informers' own stores — rather than mirroring events into a separate
+// indexer — keeps HasSynced meaningful (an informer's store is fully
+// populated before HasSynced flips, while a mirror fills in asynchronously
+// after) and avoids holding every object twice.
+type unionIndexer struct {
+	indexers []cache.Indexer
 }
 
-func mirrorInformerToIndexer(inf cache.SharedIndexInformer, idx cache.Indexer) error {
-	_, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			_ = idx.Add(obj)
-		},
-		UpdateFunc: func(_, newObj any) {
-			_ = idx.Update(newObj)
-		},
-		DeleteFunc: func(obj any) {
-			if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
-				obj = tombstone.Obj
+var errUnionIndexerReadOnly = errors.New("union indexer is read-only")
+
+func (u *unionIndexer) Add(any) error   { return errUnionIndexerReadOnly }
+func (u *unionIndexer) Bookmark(string) {}
+
+// LastStoreSyncResourceVersion is only meaningful on stores a reflector
+// writes into; nothing writes into the union, so report "unknown".
+func (u *unionIndexer) LastStoreSyncResourceVersion() string { return "" }
+func (u *unionIndexer) Update(any) error                     { return errUnionIndexerReadOnly }
+func (u *unionIndexer) Delete(any) error                     { return errUnionIndexerReadOnly }
+func (u *unionIndexer) Replace([]any, string) error          { return errUnionIndexerReadOnly }
+func (u *unionIndexer) Resync() error                        { return errUnionIndexerReadOnly }
+func (u *unionIndexer) AddIndexers(cache.Indexers) error     { return errUnionIndexerReadOnly }
+
+func (u *unionIndexer) List() []any {
+	var out []any
+	for _, idx := range u.indexers {
+		out = append(out, idx.List()...)
+	}
+	return out
+}
+
+func (u *unionIndexer) ListKeys() []string {
+	var out []string
+	for _, idx := range u.indexers {
+		out = append(out, idx.ListKeys()...)
+	}
+	return out
+}
+
+func (u *unionIndexer) Get(obj any) (any, bool, error) {
+	for _, idx := range u.indexers {
+		if item, exists, err := idx.Get(obj); err != nil || exists {
+			return item, exists, err
+		}
+	}
+	return nil, false, nil
+}
+
+func (u *unionIndexer) GetByKey(key string) (any, bool, error) {
+	for _, idx := range u.indexers {
+		if item, exists, err := idx.GetByKey(key); err != nil || exists {
+			return item, exists, err
+		}
+	}
+	return nil, false, nil
+}
+
+func (u *unionIndexer) Index(indexName string, obj any) ([]any, error) {
+	var out []any
+	for _, idx := range u.indexers {
+		items, err := idx.Index(indexName, obj)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
+	}
+	return out, nil
+}
+
+func (u *unionIndexer) IndexKeys(indexName, indexedValue string) ([]string, error) {
+	var out []string
+	for _, idx := range u.indexers {
+		keys, err := idx.IndexKeys(indexName, indexedValue)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, keys...)
+	}
+	return out, nil
+}
+
+func (u *unionIndexer) ListIndexFuncValues(indexName string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, idx := range u.indexers {
+		for _, v := range idx.ListIndexFuncValues(indexName) {
+			if _, ok := seen[v]; ok {
+				continue
 			}
-			_ = idx.Delete(obj)
-		},
-	})
-	return err
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (u *unionIndexer) ByIndex(indexName, indexedValue string) ([]any, error) {
+	var out []any
+	for _, idx := range u.indexers {
+		items, err := idx.ByIndex(indexName, indexedValue)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
+	}
+	return out, nil
+}
+
+func (u *unionIndexer) GetIndexers() cache.Indexers {
+	if len(u.indexers) == 0 {
+		return cache.Indexers{}
+	}
+	return u.indexers[0].GetIndexers()
 }
 
 // NewResourceCache creates and starts a ResourceCache from the given config.
@@ -431,22 +524,19 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 		var run func(stopCh <-chan struct{})
 
 		if !s.isClusterScoped && len(scopeNamespaces) > 1 {
-			unionIndexer := newUnionIndexer()
-			rc.indexerByKind[s.key] = unionIndexer
 			informersForKind := make([]cache.SharedIndexInformer, 0, len(scopeNamespaces))
+			stores := make([]cache.Indexer, 0, len(scopeNamespaces))
 			for _, namespace := range scopeNamespaces {
 				factory := nsFactories[namespace]
 				inf := buildInformer(s, factory, namespace)
-				if err := mirrorInformerToIndexer(inf, unionIndexer); err != nil {
-					close(stopCh)
-					return nil, fmt.Errorf("failed to register %s union indexer handler: %w", s.kind, err)
-				}
 				if err := wireInformer(inf, s, idx); err != nil {
 					close(stopCh)
 					return nil, err
 				}
 				informersForKind = append(informersForKind, inf)
+				stores = append(stores, inf.GetIndexer())
 			}
+			rc.indexerByKind[s.key] = &unionIndexer{indexers: stores}
 			synced = func() bool {
 				for _, inf := range informersForKind {
 					if !inf.HasSynced() {
