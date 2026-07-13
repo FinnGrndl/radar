@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -77,6 +78,22 @@ func SetGlobals(cfg AppConfig) {
 	versionpkg.SetCurrent(cfg.Version)
 }
 
+// validateNamespaceFanout rejects a --namespaces list that cannot fully fit
+// in the probe candidate cap. The kubeconfig context namespace is prepended
+// to the candidates, so a distinct one occupies a cap slot the flag-time
+// length check could not account for (kubeconfig wasn't parsed yet). Failing
+// here beats silently dropping the last configured namespace from probing.
+func validateNamespaceFanout(namespaces []string, ctxNs string, maxCandidates int) error {
+	slots := len(namespaces)
+	if ctxNs != "" && !slices.Contains(namespaces, ctxNs) {
+		slots++
+	}
+	if slots > maxCandidates {
+		return fmt.Errorf("--namespaces lists %d namespaces and the kubeconfig context namespace %q adds one more probe candidate, exceeding the fanout cap of %d; raise --max-scope-candidates or include the context namespace in the list", len(namespaces), ctxNs, maxCandidates)
+	}
+	return nil
+}
+
 // InitializeK8s creates and configures the Kubernetes client.
 func InitializeK8s(cfg AppConfig) error {
 	err := k8s.Initialize(k8s.InitOptions{
@@ -89,6 +106,9 @@ func InitializeK8s(cfg AppConfig) error {
 
 	if len(cfg.Namespaces) > 0 {
 		k8s.SetFallbackNamespaces(cfg.Namespaces)
+		if err := validateNamespaceFanout(cfg.Namespaces, k8s.GetContextNamespace(), k8s.MaxScopeCandidates); err != nil {
+			return err
+		}
 	} else if cfg.Namespace != "" {
 		k8s.SetFallbackNamespace(cfg.Namespace)
 	}

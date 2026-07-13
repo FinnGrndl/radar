@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -286,5 +287,24 @@ func TestConfigureNamespaceScopePreferenceResolverAuthDoesNotUseLocalSettings(t 
 	k8s.RestoreNamespaceScopePreference("ctx-a")
 	if got := k8s.GetNamespaceScopeTarget(); got != "" {
 		t.Fatalf("GetNamespaceScopeTarget() = %q, want empty", got)
+	}
+}
+
+func TestValidateNamespaceFanout(t *testing.T) {
+	full := make([]string, 20)
+	for i := range full {
+		full[i] = fmt.Sprintf("ns-%d", i)
+	}
+	if err := validateNamespaceFanout(full, "", 20); err != nil {
+		t.Fatalf("full list without context namespace should fit: %v", err)
+	}
+	if err := validateNamespaceFanout(full, "ns-3", 20); err != nil {
+		t.Fatalf("context namespace inside the list must not consume a slot: %v", err)
+	}
+	if err := validateNamespaceFanout(full, "other", 20); err == nil {
+		t.Fatal("distinct context namespace pushing past the cap must error")
+	}
+	if err := validateNamespaceFanout(full[:19], "other", 20); err != nil {
+		t.Fatalf("cap-1 list with distinct context namespace should fit: %v", err)
 	}
 }
