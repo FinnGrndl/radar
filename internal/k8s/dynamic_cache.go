@@ -65,6 +65,10 @@ func InitDynamicResourceCache(changeCh chan k8score.ResourceChange) error {
 			sharedDiscovery = discovery.ResourceDiscovery
 		}
 
+		// Wiring-time capture — same rationale as InitResourceCache: a late
+		// callback after a context switch must stamp its own cluster.
+		recordClusterContext := ActiveClusterContext()
+
 		core, err := k8score.NewDynamicResourceCache(k8score.DynamicCacheConfig{
 			DynamicClient:     client,
 			Discovery:         sharedDiscovery,
@@ -82,6 +86,7 @@ func InitDynamicResourceCache(changeCh chan k8score.ResourceChange) error {
 					return
 				}
 				recordToTimelineStore(
+					recordClusterContext,
 					change.Kind,
 					change.Namespace,
 					change.Name,
@@ -162,7 +167,11 @@ var supportedCRDFallbacks = []supportedCRDResource{
 	{Group: "argoproj.io", Versions: []string{"v1alpha1"}, Resource: "rollouts", Kind: "Rollout", Namespaced: true},
 	{Group: "argoproj.io", Versions: []string{"v1alpha1"}, Resource: "workflows", Kind: "Workflow", Namespaced: true},
 	{Group: "argoproj.io", Versions: []string{"v1alpha1"}, Resource: "cronworkflows", Kind: "CronWorkflow", Namespaced: true},
+	{Group: "argoproj.io", Versions: []string{"v1alpha1"}, Resource: "workflowtemplates", Kind: "WorkflowTemplate", Namespaced: true},
+	{Group: "argoproj.io", Versions: []string{"v1alpha1"}, Resource: "clusterworkflowtemplates", Kind: "ClusterWorkflowTemplate", Namespaced: false},
 	{Group: "cert-manager.io", Versions: []string{"v1"}, Resource: "certificates", Kind: "Certificate", Namespaced: true},
+	{Group: "cert-manager.io", Versions: []string{"v1"}, Resource: "issuers", Kind: "Issuer", Namespaced: true},
+	{Group: "cert-manager.io", Versions: []string{"v1"}, Resource: "clusterissuers", Kind: "ClusterIssuer", Namespaced: false},
 	{Group: "cert-manager.io", Versions: []string{"v1"}, Resource: "certificaterequests", Kind: "CertificateRequest", Namespaced: true},
 	{Group: "acme.cert-manager.io", Versions: []string{"v1"}, Resource: "orders", Kind: "Order", Namespaced: true},
 	{Group: "acme.cert-manager.io", Versions: []string{"v1"}, Resource: "challenges", Kind: "Challenge", Namespaced: true},
@@ -192,6 +201,7 @@ var supportedCRDFallbacks = []supportedCRDResource{
 	{Group: "external-secrets.io", Versions: []string{"v1", "v1beta1"}, Resource: "clusterexternalsecrets", Kind: "ClusterExternalSecret", Namespaced: false},
 	{Group: "external-secrets.io", Versions: []string{"v1", "v1beta1"}, Resource: "secretstores", Kind: "SecretStore", Namespaced: true},
 	{Group: "external-secrets.io", Versions: []string{"v1", "v1beta1"}, Resource: "clustersecretstores", Kind: "ClusterSecretStore", Namespaced: false},
+	{Group: "bitnami.com", Versions: []string{"v1alpha1"}, Resource: "sealedsecrets", Kind: "SealedSecret", Namespaced: true},
 	{Group: "networking.istio.io", Versions: []string{"v1", "v1beta1", "v1alpha3"}, Resource: "virtualservices", Kind: "VirtualService", Namespaced: true},
 	{Group: "networking.istio.io", Versions: []string{"v1", "v1beta1", "v1alpha3"}, Resource: "destinationrules", Kind: "DestinationRule", Namespaced: true},
 	{Group: "networking.istio.io", Versions: []string{"v1", "v1beta1", "v1alpha3"}, Resource: "gateways", Kind: "Gateway", Namespaced: true},
@@ -256,6 +266,8 @@ var supportedCRDFallbacks = []supportedCRDResource{
 	{Group: "traefik.containo.us", Versions: []string{"v1alpha1"}, Resource: "tlsoptions", Kind: "TLSOption", Namespaced: true},
 	{Group: "traefik.containo.us", Versions: []string{"v1alpha1"}, Resource: "tlsstores", Kind: "TLSStore", Namespaced: true},
 	{Group: "projectcontour.io", Versions: []string{"v1"}, Resource: "httpproxies", Kind: "HTTPProxy", Namespaced: true},
+	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "clusters", Kind: "Cluster", Namespaced: true},
+	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "poolers", Kind: "Pooler", Namespaced: true},
 	{Group: "cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "clusters", Kind: "Cluster", Namespaced: true},
 	{Group: "cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "machinedeployments", Kind: "MachineDeployment", Namespaced: true},
 	{Group: "cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "machinesets", Kind: "MachineSet", Namespaced: true},
@@ -265,6 +277,10 @@ var supportedCRDFallbacks = []supportedCRDResource{
 	{Group: "cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "machinehealthchecks", Kind: "MachineHealthCheck", Namespaced: true},
 	{Group: "cluster.x-k8s.io", Versions: []string{"v1beta2"}, Resource: "machinedrainrules", Kind: "MachineDrainRule", Namespaced: true},
 	{Group: "controlplane.cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "kubeadmcontrolplanes", Kind: "KubeadmControlPlane", Namespaced: true},
+	{Group: "bootstrap.cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "kubeadmconfigs", Kind: "KubeadmConfig", Namespaced: true},
+	{Group: "bootstrap.cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "kubeadmconfigtemplates", Kind: "KubeadmConfigTemplate", Namespaced: true},
+	{Group: "velero.io", Versions: []string{"v1"}, Resource: "backupstoragelocations", Kind: "BackupStorageLocation", Namespaced: true},
+	{Group: "velero.io", Versions: []string{"v1"}, Resource: "volumesnapshotlocations", Kind: "VolumeSnapshotLocation", Namespaced: true},
 	{Group: "aquasecurity.github.io", Versions: []string{"v1alpha1"}, Resource: "vulnerabilityreports", Kind: "VulnerabilityReport", Namespaced: true},
 	{Group: "aquasecurity.github.io", Versions: []string{"v1alpha1"}, Resource: "configauditreports", Kind: "ConfigAuditReport", Namespaced: true},
 	{Group: "aquasecurity.github.io", Versions: []string{"v1alpha1"}, Resource: "exposedsecretreports", Kind: "ExposedSecretReport", Namespaced: true},

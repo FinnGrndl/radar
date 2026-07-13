@@ -274,20 +274,12 @@ var CheckRegistry = map[string]CheckMeta{
 		Frameworks:  []string{FrameworkCIS},
 		References:  []Reference{refResources},
 	},
-	"resourceUtilization": {
-		ID:          "resourceUtilization",
-		Title:       "Resource utilization mismatch",
-		Category:    CategoryEfficiency,
-		Description: "Pod resource usage is significantly different from its requests — either wasting resources (<10% used) or at risk of throttling/OOM (>90% used).",
-		Remediation: "Adjust resources.requests to match actual usage. Use metrics or VPA recommendations to right-size.",
-		References:  []Reference{refResources},
-	},
 	"orphanConfigMapSecret": {
 		ID:          "orphanConfigMapSecret",
 		Title:       "Unused ConfigMap or Secret",
 		Category:    CategoryEfficiency,
-		Description: "This ConfigMap or Secret is not referenced by any pod (env vars, volumes, or imagePullSecrets). It may be orphaned and safe to remove.",
-		Remediation: "Verify this resource is no longer needed and delete it, or add a reference from a pod spec if it should be in use.",
+		Description: "This ConfigMap or Secret is not referenced by any workload, Ingress, or supported controller configuration. It may be orphaned and safe to remove.",
+		Remediation: "Verify this resource is no longer needed and delete it, or add a reference from the workload, Ingress, or controller configuration that should use it.",
 		References:  []Reference{refConfigMaps, refSecrets},
 	},
 
@@ -361,7 +353,7 @@ var CheckRegistry = map[string]CheckMeta{
 		// pipeline (pkg/health renders the node degraded) and the "Terminating" chip
 		// in the resource-list name cell — a badge here would be a third redundant
 		// signal. It stays in the Checks/Audit views with its deletion-age ramp.
-		Title: "Stuck terminating resource",
+		Title:       "Stuck terminating resource",
 		Category:    CategoryReliability,
 		Description: "This resource has metadata.deletionTimestamp set but is still alive past the cleanup window. Most controllers finish cleanup within seconds; minutes-long delays usually mean a finalizer's owning controller is unhealthy or unable to reach a dependent service. Common causes: the controller pod is CrashLoopBackOff, DNS resolution is broken, the finalizer logic depends on a webhook or external API that's unavailable.",
 		Remediation: "Check the controller responsible for each finalizer key (kubectl describe will show finalizers under metadata). For Argo CD, look at argocd-application-controller in the argocd namespace. For Flux, look at the matching controller (kustomize-controller, helm-controller, source-controller) in flux-system. Once the controller is healthy, deletion will resume automatically. If you must remove a stuck resource and accept the orphaned cleanup, manually clear the finalizers field — but only as a last resort.",

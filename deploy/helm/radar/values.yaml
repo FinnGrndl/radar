@@ -161,7 +161,7 @@ rbac:
     prometheus: true        # monitoring.coreos.com
     reflector: true         # reflector.v1.k8s.emberstack.com
     reloader: true          # reloader.stakater.com
-    sealedSecrets: true     # sealed-secrets.bitnami.com
+    sealedSecrets: true     # bitnami.com
     strimzi: true           # strimzi.io, kafka.strimzi.io
     tekton: true            # tekton.dev
     traefik: true           # traefik.io, traefik.containo.us
@@ -422,6 +422,18 @@ initContainers: []
 #  - name: init-myservice
 #    image: busybox:1.36
 #    command: ['sh', '-c', 'echo init']
+
+# Additional volumes to add to the pod
+extraVolumes: []
+#  - name: my-config
+#    configMap:
+#      name: my-configmap
+
+# Additional volume mounts for the main container
+extraVolumeMounts: []
+#  - name: my-config
+#    mountPath: /etc/my-config
+#    readOnly: true
 
 # Liveness and readiness probes
 probes:

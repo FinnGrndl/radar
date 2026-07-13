@@ -38,7 +38,7 @@ import (
 // setup dialog catalog (web/src/components/home/mcpToolCatalog.ts) must list
 // the same set — TestSetupDialogCoversAllTools fails CI when they diverge, so
 // add/remove the catalog entry alongside any change here.
-func registerTools(server *mcp.Server) {
+func registerTools(server *mcp.Server, includeWrites bool) {
 	boolPtr := func(b bool) *bool { return &b }
 	// All radar tools operate against the connected cluster (closed world),
 	// not the open internet — set OpenWorldHint=false so MCP clients that
@@ -450,7 +450,7 @@ func registerTools(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_workload_logs",
 		Description: "Get aggregated logs from all pods of a workload (Deployment, StatefulSet, " +
-			"or DaemonSet). Logs are collected from all matching pods concurrently, then " +
+			"DaemonSet, Job, or Argo Workflow). Logs are collected from all matching pods concurrently, then " +
 			"server-side filtered to errors, warnings, panics, and stack traces using " +
 			"deterministic regex patterns and deduplicated. Set grep for additional " +
 			"server-side filtering before that summary stage, like `kubectl logs | grep PATTERN`. " +
@@ -460,7 +460,13 @@ func registerTools(server *mcp.Server) {
 		Annotations: readOnly,
 	}, logToolCall("get_workload_logs", handleGetWorkloadLogs))
 
-	// --- Write tools (workload, cronjob, gitops) ---
+	// --- Write tools (workload, cronjob, gitops, apply, patch, node) ---
+	// Registered only on the full server. The read-only mount omits them so a
+	// read-only investigation can't even discover a mutating tool — server-side
+	// enforcement that doesn't depend on the agent CLI's own tool allowlisting.
+	if !includeWrites {
+		return
+	}
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "manage_workload",

@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,12 +29,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/skyhook-io/radar/internal/ai"
 	"github.com/skyhook-io/radar/internal/auth"
 	"github.com/skyhook-io/radar/internal/cloud"
 	"github.com/skyhook-io/radar/internal/config"
@@ -48,6 +51,7 @@ import (
 	"github.com/skyhook-io/radar/internal/updater"
 	"github.com/skyhook-io/radar/internal/version"
 	"github.com/skyhook-io/radar/pkg/hpadiag"
+	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/perfstats"
 	"github.com/skyhook-io/radar/pkg/rbac"
 	topology "github.com/skyhook-io/radar/pkg/topology"
@@ -55,22 +59,23 @@ import (
 
 // Server is the Explorer HTTP server
 type Server struct {
-	router               *chi.Mux
-	broadcaster          *SSEBroadcaster
-	port                 int
-	devMode              bool
-	staticFS             fs.FS
-	startTime            time.Time
-	listener             net.Listener
-	updater              *updater.Updater
-	mcpHandler           http.Handler
-	diagConfig           *DiagConfig
-	effectiveConfig      *config.Config // running config for GET /api/config
-	authConfig           auth.Config
-	configuredNamespaces []string
-	permCache            *auth.PermissionCache
-	oidcHandler          *auth.OIDCHandler
-	saveFileFunc         func(defaultFilename string, data []byte) (string, error)
+	router             *chi.Mux
+	broadcaster        *SSEBroadcaster
+	vitalsMetrics      vitalsMetricsMemo
+	port               int
+	devMode            bool
+	staticFS           fs.FS
+	startTime          time.Time
+	listener           net.Listener
+	updater            *updater.Updater
+	mcpHandler         http.Handler
+	mcpReadOnlyHandler http.Handler
+	diagConfig         *DiagConfig
+	effectiveConfig    *config.Config // running config for GET /api/config
+	authConfig         auth.Config
+	permCache          *auth.PermissionCache
+	oidcHandler        *auth.OIDCHandler
+	saveFileFunc       func(defaultFilename string, data []byte) (string, error)
 
 	// nsPreferences holds each user's active-namespace pick from the in-app
 	// switcher. Key shape: "<username>\x00<contextName>" when auth is enabled,
@@ -88,6 +93,12 @@ type Server struct {
 	// rebuild, not this handler's persist step).
 	scopeMutationMu sync.Mutex
 
+	// nsPickMu serializes namespace-pick mutations: the POST handler's
+	// persist+set pair and the read-path stale-pick prune. Without it, a
+	// prune computed from a stale snapshot can land after a user's fresh
+	// pick and silently revert it.
+	nsPickMu sync.Mutex
+
 	// Short-TTL cache for topology builds. The Topology graph is a
 	// deterministic projection of the informer cache; rebuilding it walks
 	// every resource of every kind. A 5s TTL absorbs the typical bursts
@@ -101,19 +112,27 @@ type Server struct {
 	// burst. Index is a pure projection of four cached listers — TTL has
 	// no semantic effect.
 	rbacMemo *rbac.Memoizer
+
+	// aiDiagnoser drives a local agent CLI for "Diagnose with AI" (nil when no
+	// CLI is on PATH — the endpoints then 501). Resolved once at startup.
+	aiDiagnoser *ai.Diagnoser
+	// aiRuns owns investigations as durable server-side jobs (survive panel close
+	// / navigation / refresh). nil exactly when aiDiagnoser is.
+	aiRuns *ai.RunManager
 }
 
 // Config holds server configuration
 type Config struct {
-	Port                 int
-	DevMode              bool           // Serve frontend from filesystem instead of embedded
-	StaticFS             embed.FS       // Embedded frontend files
-	StaticRoot           string         // Path within StaticFS
-	MCPHandler           http.Handler   // MCP server handler (nil = MCP disabled)
-	DiagConfig           *DiagConfig    // Sanitized config for diagnostics endpoint
-	EffectiveConfig      *config.Config // Running startup config for GET /api/config
-	AuthConfig           auth.Config    // Authentication configuration
-	ConfiguredNamespaces []string       // Initial namespace picks from --namespaces
+	Port               int
+	DevMode            bool           // Serve frontend from filesystem instead of embedded
+	StaticFS           embed.FS       // Embedded frontend files
+	StaticRoot         string         // Path within StaticFS
+	MCPHandler         http.Handler   // MCP server handler (nil = MCP disabled)
+	MCPReadOnlyHandler http.Handler   // read-only MCP handler (read tools only)
+	DiagConfig         *DiagConfig    // Sanitized config for diagnostics endpoint
+	EffectiveConfig    *config.Config // Running startup config for GET /api/config
+	AuthConfig         auth.Config    // Authentication configuration
+	AIHistoryDB        string         // AI run-history SQLite path ("" = memory-only runs)
 }
 
 // New creates a new server instance
@@ -121,18 +140,54 @@ func New(cfg Config) *Server {
 	cfg.AuthConfig.Defaults()
 
 	s := &Server{
-		router:               chi.NewRouter(),
-		broadcaster:          NewSSEBroadcaster(),
-		port:                 cfg.Port,
-		devMode:              cfg.DevMode,
-		startTime:            time.Now(),
-		mcpHandler:           cfg.MCPHandler,
-		diagConfig:           cfg.DiagConfig,
-		effectiveConfig:      cfg.EffectiveConfig,
-		authConfig:           cfg.AuthConfig,
-		configuredNamespaces: append([]string(nil), cfg.ConfiguredNamespaces...),
-		topoMemo:             topology.NewMemoizer(5 * time.Second),
-		rbacMemo:             rbac.NewMemoizer(5 * time.Second),
+		router:             chi.NewRouter(),
+		broadcaster:        NewSSEBroadcaster(),
+		port:               cfg.Port,
+		devMode:            cfg.DevMode,
+		startTime:          time.Now(),
+		mcpHandler:         cfg.MCPHandler,
+		mcpReadOnlyHandler: cfg.MCPReadOnlyHandler,
+		diagConfig:         cfg.DiagConfig,
+		effectiveConfig:    cfg.EffectiveConfig,
+		authConfig:         cfg.AuthConfig,
+		topoMemo:           topology.NewMemoizer(5 * time.Second),
+		rbacMemo:           rbac.NewMemoizer(5 * time.Second),
+	}
+
+	// Resolve a local agent CLI for AI diagnosis (keyless, on the user's own
+	// subscription). nil when none is found — the feature stays disabled.
+	//
+	// Gated to no-auth (local/standalone) Radar: the engine drives the CLI
+	// against this server's OWN localhost /mcp with no credentials, which only
+	// works when /mcp is unauthenticated. Under proxy/OIDC auth (team / cloud
+	// deployments) the MCP requires identity headers the local CLI can't supply,
+	// and AI diagnosis is the embedding host's job (e.g. Radar Hub) anyway.
+	// Also requires /mcp to be mounted — the agent reaches the cluster only
+	// through it, so with --no-mcp the feature can't work.
+	if !s.authConfig.Enabled() && s.mcpHandler != nil {
+		if d, err := ai.NewDetected(context.Background()); err == nil {
+			s.aiDiagnoser = d
+			// History store opens only when the engine actually enables, so a
+			// disabled feature never creates the DB. Open failure degrades to
+			// memory-only runs (the historical behavior), never blocks startup.
+			var store ai.RunStore
+			historyBroken := false
+			if cfg.AIHistoryDB != "" {
+				if st, err := ai.OpenRunStore(cfg.AIHistoryDB); err != nil {
+					log.Printf("[ai] run history disabled — could not open %s: %v", cfg.AIHistoryDB, err)
+					historyBroken = true
+				} else {
+					store = st
+				}
+			}
+			s.aiRuns = ai.NewRunManager(d, s.ActualPort, k8s.GetContextName, store)
+			if historyBroken {
+				// Persistence was requested but isn't working — the UI must say
+				// history won't survive a restart, not just a log line.
+				s.aiRuns.MarkHistoryUnavailable(cfg.AIHistoryDB)
+			}
+			log.Printf("[ai] diagnose enabled (default agent: %s)", d.DefaultAgent())
+		}
 	}
 
 	// Register a single context-switch callback so every PerformContextSwitch
@@ -142,6 +197,13 @@ func New(cfg Config) *Server {
 	// for mcpPermCache.
 	k8s.OnContextSwitch(func(_ string) {
 		s.finalizePostContextSwitch()
+	})
+	// Cancel + stale AI investigations BEFORE the client repoints at the new
+	// cluster, so an in-flight agent (especially an apply) can't write to it.
+	k8s.OnBeforeContextSwitch(func(_ string) {
+		if s.aiRuns != nil {
+			s.aiRuns.OnContextSwitch()
+		}
 	})
 
 	// Let the destructive cache operations (context switch, namespace rescope)
@@ -222,9 +284,12 @@ func (s *Server) setupRoutes() {
 
 	// CORS for development
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:*", "http://127.0.0.1:*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Content-Type"},
+		AllowedOrigins: []string{"http://localhost:*", "http://127.0.0.1:*"},
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{"Accept", "Content-Type"},
+		// Without an expose entry, cross-origin JS reads these as "" and the
+		// timeline client silently falls back to full-ring refetches.
+		ExposedHeaders:   []string{"X-Radar-Timeline-Epoch", "X-Radar-Timeline-Max-Seq"},
 		AllowCredentials: true,
 	}))
 
@@ -279,6 +344,9 @@ func (s *Server) setupRoutes() {
 		r.Get("/local-terminal", s.handleLocalTerminal)
 		r.Get("/pods/{namespace}/{name}/files/download", s.handlePodFileDownload)
 		r.Get("/workloads/{kind}/{namespace}/{name}/logs/stream", s.handleWorkloadLogsStream)
+		// AI investigation event stream via SSE — long-lived; lives outside the
+		// 60s timeout group. The run keeps going server-side after disconnect.
+		r.Get("/diagnose/runs/{id}/stream", s.handleDiagnoseRunStream)
 
 		// Node drain — outside 60s timeout group (drain may need minutes for PDB backoff)
 		r.Post("/nodes/{name}/drain", s.handleDrainNode)
@@ -288,10 +356,19 @@ func (s *Server) setupRoutes() {
 			r.Use(middleware.Timeout(60 * time.Second))
 
 			r.Get("/health", s.handleHealth)
+			r.Get("/agents", s.handleListAgents)
+			// AI investigations as durable server-side jobs (start/list/turn/stop).
+			r.Post("/diagnose/runs", s.handleDiagnoseStart)
+			r.Get("/diagnose/runs", s.handleDiagnoseList)
+			r.Post("/diagnose/runs/{id}/turns", s.handleDiagnoseTurn)
+			r.Post("/diagnose/runs/{id}/stop", s.handleDiagnoseStop)
+			r.Post("/diagnose/history/clear", s.handleDiagnoseHistoryClear)
+			r.Post("/diagnose/consent", s.handleDiagnoseConsent)
 			r.Get("/diagnostics", s.handleDiagnostics)
 			r.Get("/auth/me", s.handleAuthMe)
 			r.Get("/version-check", s.handleVersionCheck)
 			r.Get("/dashboard", s.handleDashboard)
+			r.Get("/vitals", s.handleVitals)
 			r.Get("/dashboard/crds", s.handleDashboardCRDs)
 			r.Get("/dashboard/helm", s.handleDashboardHelm)
 			r.Get("/cluster-info", s.handleClusterInfo)
@@ -337,6 +414,7 @@ func (s *Server) setupRoutes() {
 			// cluster's own services grouped by pkg/subject app-overlay,
 			// anchored on container image:tag. See applications.go.
 			r.Get("/applications", s.handleListApplications)
+			r.Get("/applications/history", s.handleApplicationHistory)
 
 			// Free-text resource search (name + namespace + labels +
 			// annotations + container images). Used by the hub fan-out
@@ -407,6 +485,7 @@ func (s *Server) setupRoutes() {
 
 			// Workload logs (non-streaming)
 			r.Get("/workloads/{kind}/{namespace}/{name}/logs", s.handleWorkloadLogs)
+			r.Get("/workloads/{kind}/{namespace}/{name}/runs", s.handleWorkloadRuns)
 			r.Get("/workloads/{kind}/{namespace}/{name}/pods", s.handleWorkloadPods)
 
 			// Helm routes
@@ -451,6 +530,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/flux/{kind}/{namespace}/{name}/resume", s.handleFluxResume)
 
 			// ArgoCD routes
+			r.Get("/argo/destinations", s.handleArgoDestinations)
 			r.Post("/argo/applications/{namespace}/{name}/sync", s.handleArgoSync)
 			r.Post("/argo/applications/{namespace}/{name}/refresh", s.handleArgoRefresh)
 			r.Post("/argo/applications/{namespace}/{name}/rollback", s.handleArgoRollback)
@@ -555,10 +635,14 @@ func (s *Server) setupRoutes() {
 	// letting the MCP handler answer with 405.
 	r.Handle("/.well-known/*", http.NotFoundHandler())
 	r.Handle("/mcp/.well-known/*", http.NotFoundHandler())
+	r.Handle("/mcp-readonly/.well-known/*", http.NotFoundHandler())
 
 	// MCP server (Model Context Protocol for AI tools)
 	if s.mcpHandler != nil {
 		r.Mount("/mcp", s.mcpHandler)
+	}
+	if s.mcpReadOnlyHandler != nil {
+		r.Mount("/mcp-readonly", s.mcpReadOnlyHandler)
 	}
 
 	// OAuth discovery probes from MCP HTTP clients. Without this, the frontend
@@ -668,6 +752,9 @@ func (s *Server) Handler() http.Handler {
 // Stop gracefully stops the server and releases the listening port.
 func (s *Server) Stop() {
 	StopAllLocalTermSessions()
+	if s.aiRuns != nil {
+		s.aiRuns.Shutdown() // cancel investigations so agent children don't outlive us
+	}
 	s.broadcaster.Stop()
 	if s.listener != nil {
 		s.listener.Close()
@@ -850,6 +937,7 @@ func mergeNamespaceCapability(global, namespaced, checkErrored bool) bool {
 func (s *Server) parseNamespacesForUser(r *http.Request) []string {
 	namespaces := parseNamespaces(r.URL.Query())
 	pickFallback := false
+	pickCtx := ""
 	if k8s.ForceNamespaceScope {
 		target := k8s.GetNamespaceScopeTarget()
 		if target == "" {
@@ -864,11 +952,20 @@ func (s *Server) parseNamespacesForUser(r *http.Request) []string {
 		}
 	}
 	if namespaces == nil {
-		// No explicit filter — use the user's saved picks if any.
+		// No explicit filter — use the user's saved picks if any, pruned of
+		// namespaces that were deleted from the cluster since the pick was made.
+		// When every pick is stale, fall through with no filter so the user sees
+		// the full cluster instead of a silently-empty UI. Read the pick and its
+		// context as one snapshot so the empty-fallback clear below commits
+		// against the same context, not one switched in mid-request.
 		s.loadSavedNamespacePreference(r)
-		if picks := s.getActiveNamespaceForUser(r); len(picks) > 0 {
-			namespaces = picks
-			pickFallback = true
+		if ctx, picks := s.getActiveNamespaceForUserInContext(r); len(picks) > 0 {
+			picks = s.pruneDeletedNamespacePicks(r, ctx, picks)
+			if len(picks) > 0 {
+				namespaces = picks
+				pickFallback = true
+				pickCtx = ctx
+			}
 		}
 	}
 	filtered := s.getUserNamespaces(r, namespaces)
@@ -877,8 +974,11 @@ func (s *Server) parseNamespacesForUser(r *http.Request) []string {
 	// stale pick entirely and recomputing as if no filter were set, so the
 	// user sees their full RBAC ceiling instead of a silently-empty UI.
 	// Symmetric with handleGetNamespaceScope's partial-revocation eviction.
+	// namespaces holds the pruned picks this fallback filtered on; clear only
+	// if it's still the live pick, so a stale read can't wipe a concurrent
+	// POST or clear across a context switch.
 	if pickFallback && noNamespaceAccess(filtered) {
-		s.setActiveNamespaceForUser(r, nil)
+		s.commitPickMutation(r, pickCtx, namespaces, nil, false)
 		filtered = s.getUserNamespaces(r, nil)
 	}
 	return filtered
@@ -1180,6 +1280,9 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("policyEffect") == "true" {
 		opts.ShowPolicyEffect = true
 	}
+	if r.URL.Query().Get("includeReplicaSets") == "true" {
+		opts.IncludeReplicaSets = true
+	}
 
 	builder := topology.NewBuilder(k8s.NewTopologyResourceProvider(k8s.GetResourceCache())).WithDynamic(k8s.NewTopologyDynamicProvider(k8s.GetDynamicResourceCache(), k8s.GetResourceDiscovery()))
 	topo, err := builder.Build(opts)
@@ -1377,6 +1480,15 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := normalizeKind(chi.URLParam(r, "kind"))
 	group := r.URL.Query().Get("group") // API group for CRD disambiguation
+	// include follows /api/search's body-verbosity vocabulary: "summary" =
+	// same shape with heavy subtrees stripped per kind profile (see
+	// resource_summary.go), "raw" or absent = full objects. Unknown values
+	// are rejected with 400 — same posture as /api/search's parseInclude.
+	includeSummary, err := parseResourcesInclude(r.URL.Query().Get("include"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// parseNamespacesForUser primes the per-user perm cache (triggers
 	// DiscoverNamespaces if needed). canRead below relies on it.
@@ -1399,7 +1511,6 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var result any
-	var err error
 
 	// listPerNs is a helper that merges results across multiple namespaces.
 	// listAll returns all items; listNs returns items for a single namespace.
@@ -1484,6 +1595,9 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if includeSummary {
+			result = applySummaryStrip(result)
+		}
 		s.writeJSON(w, result)
 		return
 	}
@@ -1785,6 +1899,9 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if includeSummary {
+		result = applySummaryStrip(result)
+	}
 	s.writeJSON(w, result)
 }
 
@@ -2191,7 +2308,7 @@ func (s *Server) handlePodMetrics(w http.ResponseWriter, r *http.Request) {
 
 	metrics, err := k8s.GetPodMetrics(r.Context(), namespace, name)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if k8score.MetricsAPIUnavailable(err) {
 			s.writeError(w, http.StatusNotFound, "Pod metrics not found (metrics-server may not be installed)")
 			return
 		}
@@ -2212,7 +2329,7 @@ func (s *Server) handleNodeMetrics(w http.ResponseWriter, r *http.Request) {
 
 	metrics, err := k8s.GetNodeMetrics(r.Context(), name)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if k8score.MetricsAPIUnavailable(err) {
 			s.writeError(w, http.StatusNotFound, "Node metrics not found (metrics-server may not be installed)")
 			return
 		}
@@ -2221,6 +2338,181 @@ func (s *Server) handleNodeMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, metrics)
+}
+
+const (
+	metricsAPIServiceKind  = "APIService"
+	metricsAPIServiceGroup = "apiregistration.k8s.io"
+	metricsAPIServiceName  = "v1beta1.metrics.k8s.io"
+)
+
+var metricsAPIServiceDiagnosisMemo = metricsAPIServiceDiagnosisCache{
+	ttl: 5 * time.Second,
+}
+
+type metricsAPIServiceDiagnosisCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	entries map[bool]metricsAPIServiceDiagnosisEntry
+}
+
+type metricsAPIServiceDiagnosisEntry struct {
+	contextName string
+	expiresAt   time.Time
+	diagnosis   string
+}
+
+func (c *metricsAPIServiceDiagnosisCache) get(contextName string, includeConditionMessage bool, build func() (string, bool)) string {
+	if c == nil || c.ttl <= 0 {
+		diagnosis, _ := build()
+		return diagnosis
+	}
+
+	c.mu.Lock()
+	if c.entries == nil {
+		c.entries = make(map[bool]metricsAPIServiceDiagnosisEntry, 2)
+	}
+	if entry, ok := c.entries[includeConditionMessage]; ok && entry.contextName == contextName && time.Now().Before(entry.expiresAt) {
+		c.mu.Unlock()
+		return entry.diagnosis
+	}
+	c.mu.Unlock()
+
+	diagnosis, cacheable := build()
+	if !cacheable {
+		return diagnosis
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[bool]metricsAPIServiceDiagnosisEntry, 2)
+	}
+	now := time.Now()
+	if entry, ok := c.entries[includeConditionMessage]; ok && entry.contextName != contextName && now.Before(entry.expiresAt) {
+		return diagnosis
+	}
+	c.entries[includeConditionMessage] = metricsAPIServiceDiagnosisEntry{
+		contextName: contextName,
+		diagnosis:   diagnosis,
+		expiresAt:   now.Add(c.ttl),
+	}
+	return diagnosis
+}
+
+func metricsHistoryCollectionError(ctx context.Context, source, errMsg string, includeAPIServiceConditionMessage bool) (string, string, string, bool) {
+	if errMsg == "" {
+		return "", "", "", false
+	}
+	if k8score.MetricsAPIUnavailable(fmt.Errorf("failed to get %s metrics: %s", strings.ToLower(source), errMsg)) {
+		return fmt.Sprintf("%s metrics not found (metrics-server may not be installed)", source), errMsg, metricsUnavailableDiagnosis(ctx, includeAPIServiceConditionMessage), true
+	}
+	return errMsg, "", "", false
+}
+
+func metricsUnavailableDiagnosis(ctx context.Context, includeAPIServiceConditionMessage bool) string {
+	cache := k8s.GetResourceCache()
+	if cache == nil {
+		return ""
+	}
+
+	contextName := k8s.GetContextName()
+	return metricsAPIServiceDiagnosisMemo.get(contextName, includeAPIServiceConditionMessage, func() (string, bool) {
+		apiService, err := cache.GetDynamicWithGroup(ctx, metricsAPIServiceKind, "", metricsAPIServiceName, metricsAPIServiceGroup)
+		return metricsAPIServiceLookupDiagnosis(apiService, err, includeAPIServiceConditionMessage), isMetricsAPIServiceLookupCacheable(apiService, err)
+	})
+}
+
+func isMetricsAPIServiceLookupCacheable(apiService *unstructured.Unstructured, err error) bool {
+	if err == nil {
+		return apiService != nil
+	}
+	return apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound)
+}
+
+func metricsAPIServiceLookupDiagnosis(apiService *unstructured.Unstructured, err error, includeConditionMessage bool) string {
+	if err != nil {
+		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
+			return "The v1beta1.metrics.k8s.io APIService is not registered. Install metrics-server or restore that APIService."
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ""
+		}
+		log.Printf("[metrics] Failed to inspect %s APIService for metrics unavailable diagnosis: %v", metricsAPIServiceName, err)
+		return ""
+	}
+	if apiService == nil {
+		return ""
+	}
+	return metricsAPIServiceDiagnosis(apiService, includeConditionMessage)
+}
+
+func metricsAPIServiceDiagnosis(apiService *unstructured.Unstructured, includeConditionMessage bool) string {
+	conditions, found, _ := unstructured.NestedSlice(apiService.Object, "status", "conditions")
+	if !found {
+		return "The v1beta1.metrics.k8s.io APIService exists but has no Available condition. Check metrics-server and API aggregation status."
+	}
+
+	for _, condition := range conditions {
+		conditionMap, ok := condition.(map[string]any)
+		if !ok {
+			continue
+		}
+		conditionType, _ := conditionMap["type"].(string)
+		if conditionType != "Available" {
+			continue
+		}
+
+		status, _ := conditionMap["status"].(string)
+		reason, _ := conditionMap["reason"].(string)
+		reasonSuffix := ""
+		if reason != "" {
+			reasonSuffix = " (" + reason + ")"
+		}
+		messageSuffix := ""
+		if includeConditionMessage {
+			messageSuffix = metricsAPIServiceConditionMessageSuffix(conditionMap)
+		}
+
+		switch status {
+		case "True":
+			return "The v1beta1.metrics.k8s.io APIService is Available, but metrics reads still fail. Check metrics-server logs and API aggregation errors."
+		case "False", "Unknown":
+			return metricsAPIServiceDiagnosisSentence(
+				"The v1beta1.metrics.k8s.io APIService is not Available"+reasonSuffix+messageSuffix,
+				"Check the metrics-server Service, endpoints, and API aggregation/TLS configuration.",
+			)
+		default:
+			return metricsAPIServiceDiagnosisSentence(
+				"The v1beta1.metrics.k8s.io APIService has an unexpected Available status"+reasonSuffix+messageSuffix,
+				"Check metrics-server and API aggregation status.",
+			)
+		}
+	}
+
+	return "The v1beta1.metrics.k8s.io APIService exists but has no Available condition. Check metrics-server and API aggregation status."
+}
+
+func metricsAPIServiceConditionMessageSuffix(conditionMap map[string]any) string {
+	message, _ := conditionMap["message"].(string)
+	message = strings.Join(strings.Fields(message), " ")
+	message = strings.TrimRight(message, ":;,")
+	if message == "" {
+		return ""
+	}
+
+	const maxRunes = 180
+	runes := []rune(message)
+	if len(runes) > maxRunes {
+		message = string(runes[:maxRunes]) + "..."
+	}
+	return ": " + message
+}
+
+func metricsAPIServiceDiagnosisSentence(subject, action string) string {
+	if strings.HasSuffix(subject, ".") || strings.HasSuffix(subject, "?") || strings.HasSuffix(subject, "!") {
+		return subject + " " + action
+	}
+	return subject + ". " + action
 }
 
 // handlePodMetricsHistory returns historical metrics for a specific pod
@@ -2239,21 +2531,23 @@ func (s *Server) handlePodMetricsHistory(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	history := store.GetPodMetricsHistory(namespace, name)
+	includeAPIServiceConditionMessage := s.canRead(r, metricsAPIServiceGroup, "apiservices", "", "get")
+	history := podMetricsHistoryResponse(r.Context(), store.GetPodMetricsHistory(namespace, name), namespace, name, store.CollectionHealth(), includeAPIServiceConditionMessage)
+	s.writeJSON(w, history)
+}
+
+func podMetricsHistoryResponse(ctx context.Context, history *k8s.PodMetricsHistory, namespace, name string, health k8s.MetricsCollectionHealth, includeAPIServiceConditionMessage bool) *k8s.PodMetricsHistory {
 	if history == nil {
-		// Return empty history — include collection error if metrics are failing
 		history = &k8s.PodMetricsHistory{
 			Namespace:  namespace,
 			Name:       name,
 			Containers: []k8s.ContainerMetricsHistory{},
 		}
-		health := store.CollectionHealth()
-		if health.PodMetrics.ConsecutiveErrors > 0 {
-			history.CollectionError = health.PodMetrics.LastError
-		}
 	}
-
-	s.writeJSON(w, history)
+	if health.PodMetrics.ConsecutiveErrors > 0 {
+		history.CollectionError, history.RawCollectionError, history.MetricsUnavailableDiagnosis, history.MetricsUnavailable = metricsHistoryCollectionError(ctx, "Pod", health.PodMetrics.LastError, includeAPIServiceConditionMessage)
+	}
+	return history
 }
 
 // handleNodeMetricsHistory returns historical metrics for a specific node
@@ -2270,19 +2564,22 @@ func (s *Server) handleNodeMetricsHistory(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	history := store.GetNodeMetricsHistory(name)
+	includeAPIServiceConditionMessage := s.canRead(r, metricsAPIServiceGroup, "apiservices", "", "get")
+	history := nodeMetricsHistoryResponse(r.Context(), store.GetNodeMetricsHistory(name), name, store.CollectionHealth(), includeAPIServiceConditionMessage)
+	s.writeJSON(w, history)
+}
+
+func nodeMetricsHistoryResponse(ctx context.Context, history *k8s.NodeMetricsHistory, name string, health k8s.MetricsCollectionHealth, includeAPIServiceConditionMessage bool) *k8s.NodeMetricsHistory {
 	if history == nil {
 		history = &k8s.NodeMetricsHistory{
 			Name:       name,
 			DataPoints: []k8s.MetricsDataPoint{},
 		}
-		health := store.CollectionHealth()
-		if health.NodeMetrics.ConsecutiveErrors > 0 {
-			history.CollectionError = health.NodeMetrics.LastError
-		}
 	}
-
-	s.writeJSON(w, history)
+	if health.NodeMetrics.ConsecutiveErrors > 0 {
+		history.CollectionError, history.RawCollectionError, history.MetricsUnavailableDiagnosis, history.MetricsUnavailable = metricsHistoryCollectionError(ctx, "Node", health.NodeMetrics.LastError, includeAPIServiceConditionMessage)
+	}
+	return history
 }
 
 // handleTopPods returns the latest metrics for all pods (bulk endpoint for table view)
@@ -2593,6 +2890,7 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 	kind := r.URL.Query().Get("kind")
 	name := r.URL.Query().Get("name")
 	sinceStr := r.URL.Query().Get("since")
+	sinceSeqStr := r.URL.Query().Get("since_seq")
 	limitStr := r.URL.Query().Get("limit")
 	filterPreset := r.URL.Query().Get("filter")
 	includeK8sEvents := r.URL.Query().Get("include_k8s_events") != "false" // default true
@@ -2640,6 +2938,14 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		// clusters; the timeline view answers for the current one only.
 		ClusterContext: k8s.ActiveClusterContext(),
 	}
+	if sinceSeqStr != "" {
+		n, err := strconv.ParseInt(sinceSeqStr, 10, 64)
+		if err != nil || n < 0 {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid since_seq %q (expected a non-negative integer)", sinceSeqStr))
+			return
+		}
+		opts.SinceSeq = n
+	}
 	if kind != "" {
 		opts.Kinds = []string{kind}
 	}
@@ -2670,8 +2976,38 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Cursor progress must be derived from the page BEFORE the RBAC filter
+	// below: rows the user can't read still advance the delta frontier, or a
+	// run of unreadable rows would pin a delta client's cursor in place while
+	// it re-fetches the same page forever.
+	//
+	// Known limitation: rows dropped inside store.Query (managed resources,
+	// excluded K8s events, presets — and every filter in the memory store)
+	// can't advance maxSeq, so a client whose newest rows are all filtered
+	// re-reads that filtered tail on every poll. A re-scan inefficiency, not
+	// data loss: every matching row is still delivered. Worst case is the
+	// SQLite store, whose SQL LIMIT applies before the Go-side content filter
+	// — a matching row buried behind more than `limit` consecutive filtered
+	// rows in seq order never surfaces through the delta path and reaches the
+	// client only via its periodic full resync. A precise fix needs a
+	// same-snapshot store max-seq that ignores content filters; deferred as
+	// not worth the concurrency risk here.
+	var maxSeq int64
+	for _, e := range events {
+		if e.Seq > maxSeq {
+			maxSeq = e.Seq
+		}
+	}
 	events = s.filterChangesByClusterScopedRBAC(r, events)
 
+	// The store epoch validates delta cursors: seq restarts from 1 when the
+	// store is re-created (process restart, context switch), so a client
+	// holding a cursor from another epoch must full-resync instead of
+	// trusting an empty delta as "nothing new".
+	w.Header().Set("X-Radar-Timeline-Epoch", strconv.FormatInt(timeline.ObservationStart().UnixNano(), 10))
+	if maxSeq > 0 {
+		w.Header().Set("X-Radar-Timeline-Max-Seq", strconv.FormatInt(maxSeq, 10))
+	}
 	s.writeJSON(w, events)
 }
 
@@ -3357,14 +3693,18 @@ func (s *Server) handleConnectionRetry(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		// Set disconnected state with error
+		errorType := k8s.ClassifyError(err)
 		k8s.SetConnectionStatus(k8s.ConnectionStatus{
 			State:     k8s.StateDisconnected,
 			Context:   ctx,
 			Error:     err.Error(),
-			ErrorType: k8s.ClassifyError(err),
+			ErrorType: errorType,
 		})
-		s.writeError(w, http.StatusServiceUnavailable, err.Error())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if encodeErr := json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "errorType": errorType}); encodeErr != nil {
+			log.Printf("Failed to encode connection retry error response: %v", encodeErr)
+		}
 		return
 	}
 
